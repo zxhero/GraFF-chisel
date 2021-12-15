@@ -140,7 +140,7 @@ class memory(AXI_ADDR_WIDTH : Int = 64, AXI_DATA_WIDTH: Int = 8, AXI_ID_WIDTH: I
   io.data_out.bready := 1.U
 }
 
-class embedding_mc(AXI_ADDR_WIDTH : Int = 64, AXI_DATA_WIDTH: Int = 64, AXI_ID_WIDTH: Int = 4, AXI_SIZE_WIDTH: Int = 3, BASE_ADDR : String = "x800000000") extends Module{
+class embedding_mc(AXI_ADDR_WIDTH : Int = 64, AXI_DATA_WIDTH: Int = 64, AXI_ID_WIDTH: Int = 4, AXI_SIZE_WIDTH: Int = 3, EMBEDDING : Int = 14) extends Module{
   val io = IO(new Bundle() {
     val data_out = Flipped(new axidata(AXI_ADDR_WIDTH, AXI_DATA_WIDTH, AXI_ID_WIDTH, AXI_SIZE_WIDTH))
     val count = Output(UInt(32.W))
@@ -176,7 +176,7 @@ class embedding_mc(AXI_ADDR_WIDTH : Int = 64, AXI_DATA_WIDTH: Int = 64, AXI_ID_W
   io.data_out.arid := count(AXI_ID_WIDTH-1, 0)
   io.data_out.arburst := 1.U(2.W)
   io.data_out.arlock := 0.U
-  io.data_out.arlen := 0.U
+  io.data_out.arlen := ((4 * EMBEDDING + 8) / AXI_DATA_WIDTH - 1).asUInt()
   io.data_out.arsize := log2Ceil(AXI_DATA_WIDTH).U
   io.data_out.araddr := io.base_addr + addr
 
