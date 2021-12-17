@@ -4,9 +4,9 @@ import chisel3._
 import chisel3.util.Decoupled
 import chisel3.util._
 
-class streamdata extends Bundle {
-  val tdata = Input(UInt(64.W))
-  val tkeep = Input(UInt(8.W))
+class streamdata(AXIS_DATA_WIDTH: Int = 8, ELEMENT_WIDTH: Int = 1) extends Bundle {
+  val tdata = Input(UInt((8 * AXIS_DATA_WIDTH).W))
+  val tkeep = Input(UInt((AXIS_DATA_WIDTH / ELEMENT_WIDTH).W))
   val tlast = Input(Bool())
   val tvalid = Input(Bool())
   val tready = Output(Bool())

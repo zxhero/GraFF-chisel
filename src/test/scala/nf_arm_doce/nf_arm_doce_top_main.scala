@@ -16,6 +16,6 @@ object V2Lgen extends App {
 //sbt 'test:runMain nf_arm_doce.V2Lgen -td ./generated/V2L'
 
 object BFSgen extends App {
-  val verilogString = (new chisel3.stage.ChiselStage).emitVerilog(new embedding_mc(AXI_DATA_WIDTH = 16), args)
+  val verilogString = (new chisel3.stage.ChiselStage).emitVerilog(new embedding_mc(), args)
   //println(verilogString)
 }

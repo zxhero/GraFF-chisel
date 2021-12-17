@@ -1,9 +1,11 @@
 package bfs
 
 import chisel3._
-import nf_arm_doce.{axidata, axilitedata}
+import chisel3.experimental.ChiselEnum
+import nf_arm_doce.{axidata, axilitedata, streamdata}
 import chisel3.util.Decoupled
 import chisel3.util._
+import utils._
 import numa.LookupTable
 
 /*class BFS(AXI_ADDR_WIDTH : Int = 44, AXI_DATA_WIDTH: Int = 16, AXI_ID_WIDTH: Int = 18, AXI_SIZE_WIDTH: Int = 3) extends Module{
@@ -140,86 +142,213 @@ class memory(AXI_ADDR_WIDTH : Int = 64, AXI_DATA_WIDTH: Int = 8, AXI_ID_WIDTH: I
   io.data_out.bready := 1.U
 }
 
-class embedding_mc(AXI_ADDR_WIDTH : Int = 64, AXI_DATA_WIDTH: Int = 64, AXI_ID_WIDTH: Int = 4, AXI_SIZE_WIDTH: Int = 3, EMBEDDING : Int = 14) extends Module{
+class axiar(AXI_ADDR_WIDTH : Int = 44, AXI_ID_WIDTH: Int = 18, AXI_SIZE_WIDTH: Int = 3, NUM : Int = 1) extends Bundle {
+  val araddr = Input(UInt((NUM * AXI_ADDR_WIDTH).W))
+  val arid = Input(UInt((NUM * AXI_ID_WIDTH).W))
+  val arlen = Input(UInt((NUM * 8).W))
+  val arsize = Input(UInt((NUM * AXI_SIZE_WIDTH).W))
+  val arburst = Input(UInt((NUM * 2).W))
+  val arlock = Input(UInt((NUM * 1).W))
+  val arvalid = Input(UInt((NUM * 1).W))
+  val arready = Output(UInt((NUM * 1).W))
+}
+
+class axiaw(AXI_ADDR_WIDTH : Int = 44, AXI_ID_WIDTH: Int = 18, AXI_SIZE_WIDTH: Int = 3, NUM : Int = 1) extends Bundle {
+  val awaddr = Input(UInt((NUM * AXI_ADDR_WIDTH).W))
+  val awid = Input(UInt((NUM * AXI_ID_WIDTH).W))
+  val awlen = Input(UInt((NUM * 8).W))
+  val awsize = Input(UInt((NUM * AXI_SIZE_WIDTH).W))
+  val awburst = Input(UInt((NUM * 2).W))
+  val awlock = Input(UInt((NUM * 1).W))
+  val awvalid = Input(UInt((NUM * 1).W))
+  val awready = Output(UInt((NUM * 1).W))
+}
+
+class axiw(AXI_DATA_WIDTH: Int = 16, NUM : Int = 1) extends Bundle {
+  val wdata = Input(UInt((NUM*8*AXI_DATA_WIDTH).W))
+  val wstrb = Input(UInt((NUM*AXI_DATA_WIDTH).W))
+  val wlast = Input(UInt((NUM * 1).W))
+  val wvalid = Input(UInt((NUM * 1).W))
+  val wready = Output(UInt((NUM * 1).W))
+}
+
+class axib(AXI_ID_WIDTH: Int = 18, NUM : Int = 1) extends Bundle {
+  val bresp = Output(UInt((NUM * 2).W))
+  val bid = Output(UInt((NUM * AXI_ID_WIDTH).W))
+  val bvalid = Output(UInt((NUM * 1).W))
+  val bready = Input(UInt((NUM * 1).W))
+}
+
+class arbitator(AXI_ADDR_WIDTH : Int = 64, AXI_ID_WIDTH: Int = 4, AXI_SIZE_WIDTH: Int = 3, NUM : Int = 1) extends  BlackBox {
   val io = IO(new Bundle() {
-    val data_out = Flipped(new axidata(AXI_ADDR_WIDTH, AXI_DATA_WIDTH, AXI_ID_WIDTH, AXI_SIZE_WIDTH))
-    val count = Output(UInt(32.W))
-    val base_addr = Input(UInt(64.W))
-    //val data_in = (new axidata(64, AXI_DATA_WIDTH, AXI_ID_WIDTH, AXI_SIZE_WIDTH))
+    val xbar_in = (new axiar(AXI_ADDR_WIDTH, AXI_ID_WIDTH, AXI_SIZE_WIDTH, NUM))
+    val ddr_out = Flipped(new axiar(AXI_ADDR_WIDTH, AXI_ID_WIDTH, AXI_SIZE_WIDTH, 1))
+  })
+}
+
+class WB_engine(AXI_ADDR_WIDTH : Int = 64, AXI_DATA_WIDTH: Int = 64, AXI_ID_WIDTH: Int = 4, AXI_SIZE_WIDTH: Int = 3) extends BlackBox{
+  val io = IO(new Bundle() {
+    val ddr_aw = Flipped(new axiaw(AXI_ADDR_WIDTH, AXI_ID_WIDTH, AXI_SIZE_WIDTH, 1))
+    val ddr_w = Flipped(new axiw(AXI_DATA_WIDTH, 1))
+    val ddr_b = Flipped(new axib(AXI_ID_WIDTH, 1))
+
+    val xbar_in = (new streamdata(8))
+  })
+}
+
+class selector(AXI_DATA_WIDTH: Int = 64) extends BlackBox{
+  val io = IO(new Bundle() {
+    val xbar_in = (new streamdata(AXI_DATA_WIDTH))
+    val ddr_out = Flipped(new streamdata(4))
+  })
+}
+
+class embedding_mc(AXI_ADDR_WIDTH : Int = 64, AXI_DATA_WIDTH: Int = 64, AXI_ID_WIDTH: Int = 6, AXI_SIZE_WIDTH: Int = 3, EMBEDDING : Int = 14) extends Module{
+  val io = IO(new Bundle() {
+    val ddr_out = Flipped(new axidata(AXI_ADDR_WIDTH, AXI_DATA_WIDTH, AXI_ID_WIDTH, AXI_SIZE_WIDTH))
+    //val count = Output(UInt(32.W))
+    val embedding_base_addr = Input(UInt(64.W))
+    val edge_base_addr = Input(UInt(64.W))
+    val level_base_addr = Input(UInt(64.W))
+    val xbar_in = (new streamdata(64, 4))
+    val xbar_out = Flipped(new streamdata(64, 4))
   })
   assert(AXI_DATA_WIDTH >= 8)
+  assert(AXI_ID_WIDTH > log2Ceil(32))
 
+  //front end of upward
+  val vertex_in_buffer = Module(new fifo(32, 512 + 16))
+  vertex_in_buffer.io.dataIn := Cat(io.xbar_in.tdata, io.xbar_in.tkeep)
+  vertex_in_buffer.io.writeFlag := io.xbar_in.tvalid
+
+  io.xbar_in.tready := vertex_in_buffer.io.full === false.B
+
+  val Selector = Module(new selector(64))
+  Selector.io.xbar_in.tdata := vertex_in_buffer.io.dataOut(512 + 16 - 1, 16)
+  Selector.io.xbar_in.tvalid := vertex_in_buffer.io.empty === false.B
+  Selector.io.xbar_in.tlast := true.B
+  Selector.io.xbar_in.tkeep := vertex_in_buffer.io.dataOut(15, 0)
+  vertex_in_buffer.io.readFlag := Selector.io.xbar_in.tready
+
+  //back end of upward
   //read offset and edge embedding array
-  val count = RegInit(0.U(32.W))
-  val embedding_arvalid = RegInit(false.B)
-  when(io.data_out.arvalid.asBool() && io.data_out.arready.asBool() && io.data_out.rvalid.asBool() && io.data_out.rready.asBool() && io.data_out.rlast.asBool()){
-    count := count
-  }.elsewhen(io.data_out.arvalid.asBool() && io.data_out.arready.asBool()) {
-    count := count + 1.U
-  }.elsewhen(io.data_out.rvalid.asBool() && io.data_out.rready.asBool() && io.data_out.rlast.asBool()) {
-    count := count - 1.U
-  }
+  val vertex_read_buffer = Module(new fifo(32, 32))
+  vertex_read_buffer.io.writeFlag := Selector.io.ddr_out.tvalid
+  vertex_read_buffer.io.dataIn := Selector.io.ddr_out.tdata
 
-  val full = (count >= 32.U)
-  when(full.asBool()){
-    embedding_arvalid := false.B
+
+  //read edge array
+  val edge_read_buffer = Module(new fifo(32, 64))
+  edge_read_buffer.io.dataIn := io.ddr_out.rdata(8 * 8 - 1, 0)
+  edge_read_buffer.io.writeFlag := !io.ddr_out.rid(AXI_ID_WIDTH - 1) & io.ddr_out.rvalid
+
+  val ar_arbitator = Module(new arbitator(AXI_ADDR_WIDTH, AXI_ID_WIDTH, AXI_SIZE_WIDTH, 2))
+  io.ddr_out.araddr := ar_arbitator.io.ddr_out.araddr
+  io.ddr_out.arid := ar_arbitator.io.ddr_out.arid
+  io.ddr_out.arvalid := ar_arbitator.io.ddr_out.arvalid
+  io.ddr_out.arsize := ar_arbitator.io.ddr_out.arsize
+  io.ddr_out.arlen := ar_arbitator.io.ddr_out.arlen
+  io.ddr_out.arlock := ar_arbitator.io.ddr_out.arlock
+  io.ddr_out.arburst := ar_arbitator.io.ddr_out.arburst
+  ar_arbitator.io.ddr_out.arready := io.ddr_out.arready
+
+  ar_arbitator.io.xbar_in.araddr:= Cat(io.edge_base_addr + edge_read_buffer.io.dataOut(63,32) << 2 ,
+    io.embedding_base_addr + vertex_read_buffer.io.dataOut << log2Ceil(4 * EMBEDDING + 8))
+  ar_arbitator.io.xbar_in.arvalid := Cat(edge_read_buffer.io.empty === false.B, vertex_read_buffer.io.empty === false.B)
+  val remainning_edges = (edge_read_buffer.io.dataOut(31, 0) - EMBEDDING.asUInt())
+  val arlen = Mux(((remainning_edges >> log2Ceil(AXI_DATA_WIDTH/4)) << log2Ceil(AXI_DATA_WIDTH/4)).asUInt() < remainning_edges,
+    (remainning_edges >> log2Ceil(AXI_DATA_WIDTH/4)).asUInt() + 1.U,
+    (remainning_edges >> log2Ceil(AXI_DATA_WIDTH/4)))
+  ar_arbitator.io.xbar_in.arlen := Cat(arlen.asUInt() - 1.U, ((4 * EMBEDDING + 8) / AXI_DATA_WIDTH - 1).asUInt())
+  ar_arbitator.io.xbar_in.arburst := Cat(1.U(2.W), 1.U(2.W))
+  ar_arbitator.io.xbar_in.arlock := 0.U
+  ar_arbitator.io.xbar_in.arsize := Cat(log2Ceil(AXI_DATA_WIDTH).U(AXI_SIZE_WIDTH.W),
+    log2Ceil(AXI_DATA_WIDTH).U(AXI_SIZE_WIDTH.W))
+  ar_arbitator.io.xbar_in.arid := Cat((1.U(AXI_ID_WIDTH) << (AXI_ID_WIDTH - 1)).asUInt() + edge_read_buffer.io.rptr,
+    vertex_read_buffer.io.rptr)
+  vertex_read_buffer.io.readFlag := ar_arbitator.io.xbar_in.arready(0)
+  edge_read_buffer.io.readFlag := ar_arbitator.io.xbar_in.arready(1)
+
+  //front end of down ward
+  val num_regfile = Module(new regFile(32, 32))
+  num_regfile.io.writeFlag := ar_arbitator.io.xbar_in.arready(1) & ar_arbitator.io.xbar_in.arvalid(1)
+  num_regfile.io.wptr := edge_read_buffer.io.rptr
+  num_regfile.io.dataIn := remainning_edges
+  num_regfile.io.rptr := io.ddr_out.rid(AXI_ID_WIDTH-2, 0)
+
+  //back end of down ward
+  object sm extends ChiselEnum {
+    //val idole = Value(0x0.U)
+    val firstBurst  = Value(0x1.U) // i "load"  -> 000_0011
+    val remainingBurst   = Value(0x2.U) // i "imm"   -> 001_0011
+  }
+  val status = RegInit(sm.firstBurst)
+  val num = RegInit(0.U(32.W))
+  when(status === sm.firstBurst && io.ddr_out.rvalid.asBool() && io.ddr_out.rready.asBool()){
+    when(io.ddr_out.rlast.asBool()){
+      status := sm.firstBurst
+      num := 0.U
+    }.otherwise{
+      num := num_regfile.io.dataOut
+      status := sm.remainingBurst
+    }
+  }.elsewhen(status === sm.remainingBurst && io.ddr_out.rvalid.asBool() && io.ddr_out.rready.asBool()){
+    when(io.ddr_out.rlast.asBool()){
+      status := sm.firstBurst
+      num := 0.U
+    }.otherwise{
+      num := num - 16.U
+      status := sm.remainingBurst
+    }
   }.otherwise{
-    embedding_arvalid := true.B
+    num := num
+    status := status
+  }
+  val keep = Wire(Vec(16, Bool()))
+  keep.zipWithIndex.map {
+    case(k, i) => k := Mux(io.ddr_out.rid(AXI_ID_WIDTH-1), Mux(status === sm.firstBurst, num_regfile.io.dataOut > i.U, num > i.U),
+      Mux(i.U < 2.U, false.B, true.B))
   }
 
-  val addr = RegInit(0.U(30.W))
-  when(io.data_out.arvalid.asBool() && io.data_out.arready.asBool()) {
-    addr := addr + 0x1000.U
-  }
-  io.count := count
-  io.data_out.arvalid := embedding_arvalid & !full
-  io.data_out.arid := count(AXI_ID_WIDTH-1, 0)
-  io.data_out.arburst := 1.U(2.W)
-  io.data_out.arlock := 0.U
-  io.data_out.arlen := ((4 * EMBEDDING + 8) / AXI_DATA_WIDTH - 1).asUInt()
-  io.data_out.arsize := log2Ceil(AXI_DATA_WIDTH).U
-  io.data_out.araddr := io.base_addr + addr
-
-  io.data_out.rready := 1.U
+  val vertex_out_fifo = Module(new fifo(2, 512 + 16))
+  io.xbar_out.tvalid := vertex_out_fifo.io.empty === false.B
+  io.xbar_out.tkeep := vertex_out_fifo.io.dataOut(15, 0)
+  io.xbar_out.tdata := vertex_out_fifo.io.dataOut(512 + 16 - 1, 16)
+  io.xbar_out.tlast := true.B
+  vertex_out_fifo.io.readFlag := io.xbar_out.tready
+  vertex_out_fifo.io.writeFlag := io.ddr_out.rvalid
+  vertex_out_fifo.io.dataIn := Cat(io.ddr_out.rdata, keep.asUInt())
+  io.ddr_out.rready := vertex_out_fifo.io.full === false.B
 
   //write value array
-  val wcount = RegInit(0.U(32.W))
-  when(io.data_out.rvalid.asBool() && io.data_out.rready.asBool() && io.data_out.rlast.asBool()
-    && io.data_out.wvalid.asBool() && io.data_out.wready.asBool()){
-    wcount := wcount
-  }.elsewhen(io.data_out.rvalid.asBool() && io.data_out.rready.asBool() && io.data_out.rlast.asBool()){
-    wcount := wcount + 1.U
-  }.elsewhen(io.data_out.wvalid.asBool() && io.data_out.wready.asBool()) {
-    wcount := wcount - 1.U
-  }
+  val vertex_update_buffer = Module(new fifo(32, 64))
+  vertex_update_buffer.io.writeFlag := Selector.io.ddr_out.tvalid
+  vertex_update_buffer.io.dataIn := Selector.io.ddr_out.tdata
 
-  io.data_out.wvalid := wcount > 0.U
-  io.data_out.wlast := 1.U
-  io.data_out.wdata := 0.U
-  io.data_out.wstrb := 0xff.U
+  Selector.io.ddr_out.tready := vertex_read_buffer.io.full === false.B & vertex_update_buffer.io.full === false.B
 
-  val awcount = RegInit(0.U(32.W))
-  when(io.data_out.rvalid.asBool() && io.data_out.rready.asBool() && io.data_out.rlast.asBool()
-    && io.data_out.awvalid.asBool() && io.data_out.awready.asBool()){
-    awcount := awcount
-  }.elsewhen(io.data_out.rvalid.asBool() && io.data_out.rready.asBool() && io.data_out.rlast.asBool()){
-    awcount := awcount + 1.U
-  }.elsewhen(io.data_out.awvalid.asBool() && io.data_out.awready.asBool()) {
-    awcount := awcount - 1.U
-  }
+  val update_engine = Module(new WB_engine(AXI_ADDR_WIDTH, AXI_DATA_WIDTH, AXI_ID_WIDTH, AXI_DATA_WIDTH))
+  update_engine.io.xbar_in.tdata := vertex_update_buffer.io.dataOut
+  update_engine.io.xbar_in.tvalid := vertex_update_buffer.io.empty === false.B
+  vertex_update_buffer.io.readFlag := update_engine.io.xbar_in.tready
 
-  val awaddr = RegInit(0.U(30.W))
-  when(io.data_out.awvalid.asBool() && io.data_out.awready.asBool()) {
-    awaddr := awaddr + 0x1000.U
-  }
+  io.ddr_out.wvalid := update_engine.io.ddr_w.wvalid
+  io.ddr_out.wlast := update_engine.io.ddr_w.wlast
+  io.ddr_out.wdata := update_engine.io.ddr_w.wdata
+  io.ddr_out.wstrb := update_engine.io.ddr_w.wstrb
+  update_engine.io.ddr_w.wready := io.ddr_out.wready
 
-  io.data_out.awvalid := awcount > 0.U
-  io.data_out.awid := awcount(AXI_ID_WIDTH-1, 0)
-  io.data_out.awsize := log2Ceil(8).U
-  io.data_out.awlen := 0.U
-  io.data_out.awburst := 1.U(2.W)
-  io.data_out.awlock := 0.U
-  io.data_out.awaddr := io.base_addr + awaddr
+  io.ddr_out.awvalid := update_engine.io.ddr_aw.awvalid
+  io.ddr_out.awid := update_engine.io.ddr_aw.awid
+  io.ddr_out.awsize := update_engine.io.ddr_aw.awsize
+  io.ddr_out.awlen := update_engine.io.ddr_aw.awlen
+  io.ddr_out.awburst := update_engine.io.ddr_aw.awburst
+  io.ddr_out.awlock := update_engine.io.ddr_aw.awlock
+  io.ddr_out.awaddr := update_engine.io.ddr_aw.awaddr
+  update_engine.io.ddr_aw.awready := io.ddr_out.awready
 
-  io.data_out.bready := 1.U
+  io.ddr_out.bready := update_engine.io.ddr_b.bready
+  update_engine.io.ddr_b.bvalid := io.ddr_out.bvalid
+  update_engine.io.ddr_b.bresp := io.ddr_out.bresp
+  update_engine.io.ddr_b.bid := io.ddr_out.bid
 }
