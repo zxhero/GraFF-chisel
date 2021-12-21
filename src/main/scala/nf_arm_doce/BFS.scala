@@ -8,21 +8,6 @@ import chisel3.util._
 import utils._
 import numa.LookupTable
 
-/*class BFS(AXI_ADDR_WIDTH : Int = 44, AXI_DATA_WIDTH: Int = 16, AXI_ID_WIDTH: Int = 18, AXI_SIZE_WIDTH: Int = 3) extends Module{
-  val io = IO(new Bundle() {
-    val config = new axilitedata(AXI_ADDR_WIDTH)
-    val PLmempory = Flipped(new axidata(64, AXI_DATA_WIDTH, AXI_ID_WIDTH, AXI_SIZE_WIDTH))
-    val PSmempory = Flipped(new axidata(64, AXI_DATA_WIDTH, AXI_ID_WIDTH, AXI_SIZE_WIDTH))
-
-  })
-
-  //1st entry for start register
-  val controls = Module(new LookupTable(depth = 2, AXI_ADDR_WIDTH = AXI_ADDR_WIDTH))
-  controls.config <> io.config
-  val start = controls.io.data(0)(0)
-
-
-}*/
 class xbar(AXI_ADDR_WIDTH : Int = 64, AXI_DATA_WIDTH: Int = 8, AXI_ID_WIDTH: Int = 1, AXI_SIZE_WIDTH: Int = 3) extends BlackBox {
   val io = IO(new Bundle {
     val s_axi = new axidata(AXI_ADDR_WIDTH, AXI_DATA_WIDTH, AXI_ID_WIDTH, AXI_SIZE_WIDTH, 2)
@@ -244,30 +229,149 @@ class WB_engine(AXI_ADDR_WIDTH : Int = 64, AXI_DATA_WIDTH: Int = 64, AXI_ID_WIDT
   })
 
   val buffer = Module(new URAM(524288,32))
-  val wb_block_addr = RegInit(0.U(4.W))
 
   //update buffer
   object sm extends ChiselEnum {
-    //val idole = Value(0x0.U)
+    val idole = Value(0x0.U)
     val read_size  = Value(0x1.U) // i "load"  -> 000_0011
     val write_addr   = Value(0x2.U) // i "imm"   -> 001_0011
     val write_level = Value(0x3.U)
     val write_size = Value(0x4.U)
-    val wb_busy = Value(0x5.U)
+    val read_addr = Value(0x5.U)
+
+    val read_level1 = Value(0x6.U)
+    val wb_level1 = Value(0x7.U)
+    val read_level2 = Value(0x8.U)
+    val wb_level2 = Value(0x9.U)
   }
   val update_sm = RegInit(sm.read_size)
+  val wb_sm = RegInit(sm.idole)
   val vid = RegInit(0.U(32.W))
   val level = RegInit(0.U(32.W))
   when(io.xbar_in.tvalid && io.xbar_in.tready){
     vid := io.xbar_in.tdata(63, 32)
     level := io.xbar_in.tdata(31, 0)
   }
+  io.xbar_in.tready := update_sm === sm.read_size & (wb_sm === sm.idole)
   when(io.xbar_in.tvalid && io.xbar_in.tready){
+    update_sm := sm.read_addr
+  }.elsewhen(update_sm === sm.read_addr){
     update_sm := sm.write_addr
+  }.elsewhen(update_sm === sm.write_addr){
+    update_sm := sm.write_level
+  }.elsewhen(update_sm === sm.write_level){
+    update_sm := sm.write_size
+  }.elsewhen(update_sm === sm.write_size){
+    update_sm := sm.read_size
   }
+  val addr = Wire(UInt(16.W))
+  addr := vid(11, 0) << 2.U
+  val block_addr = vid(25 - 2, 14 - 2) << 7
+  val size_addr = 0.U(7.W)
+  val size = RegInit(0.U(32.W))
+  val addr_addr = 2.U + size >> 1.U
+  val level_addr = (2 + 42).U + size
+  when(update_sm === sm.read_size) {
+    size := buffer.io.douta
+  }
+  val old_addr_pair = RegInit(0.U(32.W))
+  when(update_sm === sm.read_addr) {
+    old_addr_pair := buffer.io.douta
+  }
+  val new_addr_pair = Mux(size(0), Cat(addr, old_addr_pair(15, 0)), Cat(old_addr_pair(31, 16), addr))
+  buffer.io.ena := (io.xbar_in.tvalid & io.xbar_in.tready) | (update_sm === sm.read_addr) | (update_sm === sm.write_addr) |
+    (update_sm === sm.write_level) | (update_sm === sm.write_size)
+  buffer.io.wea := (update_sm === sm.write_addr) | (update_sm === sm.write_level) | (update_sm === sm.write_size)
+  buffer.io.addra := Mux1H(Seq(
+    (update_sm === sm.read_size) -> (block_addr.asUInt() + size_addr),
+    (update_sm === sm.read_addr) -> (block_addr.asUInt() + addr_addr),
+    (update_sm === sm.write_addr) -> (block_addr.asUInt() + addr_addr),
+    (update_sm === sm.write_level) -> (block_addr.asUInt() + level_addr),
+    (update_sm === sm.write_size) -> (block_addr.asUInt() + size_addr)
+  ))
+  buffer.io.dina := Mux1H(Seq(
+    (update_sm === sm.write_addr) -> (new_addr_pair),
+    (update_sm === sm.write_level) -> (level),
+    (update_sm === sm.write_size) -> (size + 1.U)
+  ))
+  buffer.io.clka := clock.asBool()
 
   //write back buffer
+  val count = RegInit(0.U(8.W))
+  val aw_buffer = Module(new fifo(32, AXI_ADDR_WIDTH))
+  val w_buffer = Module(new fifo(32, 32))
+  val wb_block_addr = RegInit(0.U(19.W))
+  when(update_sm === sm.write_size && buffer.io.dina === 84.U){
+    wb_block_addr := block_addr
+  }
+  when(update_sm === sm.write_size && buffer.io.dina === 84.U){
+    wb_sm := sm.read_addr
+  }.elsewhen(wb_sm === sm.read_addr) {
+    wb_sm := sm.read_level1
+  }.elsewhen(wb_sm === sm.read_level1) {
+    wb_sm := sm.wb_level1
+  }.elsewhen(wb_sm === sm.wb_level1 && aw_buffer.io.full === false.B && w_buffer.io.full === false.B) {
+    wb_sm := sm.read_level2
+  }.elsewhen(wb_sm === sm.read_level2) {
+    wb_sm := sm.wb_level2
+  }.elsewhen(wb_sm === sm.wb_level2 && aw_buffer.io.full === false.B && w_buffer.io.full === false.B) {
+    when(count === 83.U){
+      wb_sm := sm.write_size
+    }.otherwise{
+      wb_sm := sm.read_addr
+    }
+  }.elsewhen(wb_sm === sm.write_size) {
+    wb_sm := sm.idole
+  }
+  when(update_sm === sm.write_size && buffer.io.dina === 84.U){
+    count := 0.U
+  }.elsewhen(wb_sm === sm.wb_level1 && aw_buffer.io.full === false.B && w_buffer.io.full === false.B){
+    count := count + 1.U
+  }.elsewhen(wb_sm === sm.wb_level2 && aw_buffer.io.full === false.B && w_buffer.io.full === false.B) {
+    count := count + 1.U
+  }
 
+  val wb_addr_pair = RegInit(0.U(32.W))
+  val wb_level = RegInit(0.U(32.W))
+  buffer.io.enb := (wb_sm === sm.read_addr) | (wb_sm === sm.read_level1) | (wb_sm === sm.read_level2) |
+    (wb_sm === sm.write_size)
+  buffer.io.web := (wb_sm === sm.write_size)
+  buffer.io.addrb := Mux1H(Seq(
+    (update_sm === sm.read_addr) -> (wb_block_addr.asUInt() + 2.U + (count >> 1.U)),
+    (update_sm === sm.read_level1) -> (wb_block_addr.asUInt() + (2 + 42).U + count),
+    (update_sm === sm.read_level2) -> (wb_block_addr.asUInt() + (2 + 42).U + count),
+    (update_sm === sm.write_size) -> (wb_block_addr.asUInt() + size_addr)
+  ))
+  buffer.io.dinb := 0.U
+  buffer.io.clkb := clock.asBool()
+  when(wb_sm === sm.read_addr){
+    wb_addr_pair := buffer.io.doutb
+  }
+  when(wb_sm === sm.read_level1 || wb_sm === sm.read_level2){
+    wb_level := buffer.io.doutb
+  }
+
+  aw_buffer.io.writeFlag := wb_sm === sm.wb_level1 || wb_sm === sm.wb_level2
+  aw_buffer.io.dataIn := Mux(wb_sm === sm.wb_level1, io.level_base_addr + Cat(wb_block_addr(18, 7), wb_addr_pair(13,0)).asUInt(),
+    io.level_base_addr + Cat(wb_block_addr(18, 7), wb_addr_pair(16 + 14 - 1,16)))
+  io.ddr_aw.awaddr := aw_buffer.io.dataOut
+  io.ddr_aw.awlock := 0.U
+  io.ddr_aw.awid := aw_buffer.io.rptr
+  io.ddr_aw.awlen := 0.U
+  io.ddr_aw.awburst := 1.U(2.W)
+  io.ddr_aw.awsize := 2.U
+  io.ddr_aw.awvalid := aw_buffer.io.empty === false.B
+  aw_buffer.io.readFlag := io.ddr_aw.awready
+
+  w_buffer.io.writeFlag := wb_sm === sm.wb_level1 || wb_sm === sm.wb_level2
+  w_buffer.io.dataIn := wb_level
+  io.ddr_w.wdata := w_buffer.io.dataOut
+  io.ddr_w.wlast := true.B
+  io.ddr_w.wvalid := w_buffer.io.empty === false.B
+  io.ddr_w.wstrb := 0xf.U
+  w_buffer.io.readFlag := io.ddr_w.wready
+
+  io.ddr_b.bready := true.B
 }
 
 class axis_arbitrator(AXI_DATA_WIDTH: Int = 64) extends Module{
@@ -343,6 +447,8 @@ class embedding_mc(AXI_ADDR_WIDTH : Int = 64, AXI_DATA_WIDTH: Int = 64, AXI_ID_W
     val xbar_in = (new streamdata(64, 4))
     val xbar_out = Flipped(new streamdata(64, 4))
     val level = Input(UInt(32.W))
+    val read_finish = Output(Bool())
+    val write_finish = Output(Bool())
   })
   assert(AXI_DATA_WIDTH >= 8)
   assert(AXI_ID_WIDTH > log2Ceil(32))
@@ -463,6 +569,8 @@ class embedding_mc(AXI_ADDR_WIDTH : Int = 64, AXI_DATA_WIDTH: Int = 64, AXI_ID_W
   update_engine.io.xbar_in.tvalid := vertex_update_buffer.io.empty === false.B
   update_engine.io.level_base_addr := io.level_base_addr
   update_engine.io.level_size := 26.U
+  update_engine.io.xbar_in.tlast := true.B
+  update_engine.io.xbar_in.tkeep := 0xff.U
   vertex_update_buffer.io.readFlag := update_engine.io.xbar_in.tready
 
   io.ddr_out.wvalid := update_engine.io.ddr_w.wvalid
@@ -484,4 +592,83 @@ class embedding_mc(AXI_ADDR_WIDTH : Int = 64, AXI_DATA_WIDTH: Int = 64, AXI_ID_W
   update_engine.io.ddr_b.bvalid := io.ddr_out.bvalid
   update_engine.io.ddr_b.bresp := io.ddr_out.bresp
   update_engine.io.ddr_b.bid := io.ddr_out.bid
+
+  io.read_finish := vertex_read_buffer.io.empty & edge_read_buffer.io.empty
+  io.write_finish := vertex_in_buffer.io.empty
+}
+
+/*
+* test_finish: PE has sent all current tier
+* end: there is no current tier for the level
+* start: the start signal for BFS from the root
+* */
+class PE extends BlackBox {
+  val io = IO(new Bundle() {
+    val xbar_in = new streamdata(64, 4)
+    val xbar_out = Flipped(new streamdata(4, 4))
+    val test_finish = Output(Bool())
+    val end = Output(Bool())
+    val start = Input(Bool())
+    val level = Input(UInt(32.W))
+    val root = Input(UInt(32.W))
+  })
+}
+
+class BFS(AXI_ADDR_WIDTH : Int = 64, AXI_DATA_WIDTH: Int = 64, AXI_ID_WIDTH: Int = 6, AXI_SIZE_WIDTH: Int = 3) extends Module{
+  val io = IO(new Bundle() {
+    val config = new axilitedata(AXI_ADDR_WIDTH)
+    val PLmemory = Flipped(new axidata(AXI_ADDR_WIDTH, AXI_DATA_WIDTH, AXI_ID_WIDTH, AXI_SIZE_WIDTH))
+    //val PSmempory = Flipped(new axidata(64, AXI_DATA_WIDTH, AXI_ID_WIDTH, AXI_SIZE_WIDTH))
+  })
+
+  //0 --- start register
+  //1 --- embedding_base_addr(31, 0)
+  //2 --- embedding_base_addr(63, 32)
+  //3 --- edge_base_addr(31, 0)
+  //4 --- edge_base_addr(63, 32)
+  //5 --- level_base_addr(31, 0)
+  //6 --- level_base_addr(63, 32)
+  //7 --- root
+  val controls = Module(new LookupTable(depth = 8, AXI_ADDR_WIDTH = AXI_ADDR_WIDTH))
+  val start = controls.io.data(0)(0)
+  val level = RegInit(0.U(32.W))
+  controls.config <> io.config
+
+  val pl_mc = Module(new embedding_mc(AXI_ADDR_WIDTH, AXI_DATA_WIDTH, AXI_ID_WIDTH, AXI_SIZE_WIDTH))
+  io.PLmemory <> pl_mc.io.ddr_out
+  pl_mc.io.embedding_base_addr := Cat(controls.io.data(2), controls.io.data(1))
+  pl_mc.io.edge_base_addr := Cat(controls.io.data(4), controls.io.data(3))
+  pl_mc.io.level_base_addr := Cat(controls.io.data(6), controls.io.data(5))
+
+  val PEs = Seq.fill(16)(Module(new PE))
+  val PEs_tvalid = Wire(Vec(16, Bool()))
+  val PEs_test_finish = Wire(Vec(16, Bool()))
+  val PEs_end = Wire(Vec(16, Bool()))
+  val PEs_tkeep = Wire(Vec(16, Bool()))
+  val PEs_tdata = Wire(Vec(16, UInt(32.W)))
+  PEs.zipWithIndex.map{
+    case (pe, i) => {
+      pe.io.xbar_in <> pl_mc.io.xbar_out
+      PEs_tkeep(i) := pe.io.xbar_out.tkeep.asBool()
+      PEs_tdata(i) := pe.io.xbar_out.tdata
+      pe.io.xbar_out.tready := pl_mc.io.xbar_in.tready
+      pe.io.start := start
+      pe.io.level := level
+      pe.io.root := controls.io.data(7)
+      PEs_tvalid(i) := pe.io.xbar_out.tvalid
+      PEs_end(i) := pe.io.test_finish
+      PEs_test_finish(i) := pe.io.test_finish
+    }
+  }
+  pl_mc.io.xbar_in.tkeep := PEs_tkeep.asUInt()
+  pl_mc.io.xbar_in.tvalid := PEs_tvalid.reduce(_|_)
+  pl_mc.io.xbar_in.tlast := true.B
+  pl_mc.io.xbar_in.tdata := PEs_tdata.asUInt()
+
+  pl_mc.io.level := level
+  when(PEs_end.reduce(_&_)) {
+    level := 0.U
+  }.elsewhen(PEs_test_finish.reduce(_&_) && pl_mc.io.write_finish && pl_mc.io.read_finish){
+    level := level + 1.U
+  }
 }
