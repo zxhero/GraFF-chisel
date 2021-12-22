@@ -8,16 +8,7 @@ import chisel3.util._
 import utils._
 import numa.LookupTable
 
-class xbar(AXI_ADDR_WIDTH : Int = 64, AXI_DATA_WIDTH: Int = 8, AXI_ID_WIDTH: Int = 1, AXI_SIZE_WIDTH: Int = 3) extends BlackBox {
-  val io = IO(new Bundle {
-    val s_axi = new axidata(AXI_ADDR_WIDTH, AXI_DATA_WIDTH, AXI_ID_WIDTH, AXI_SIZE_WIDTH, 2)
-    val m_axi = Flipped(new axidata(AXI_ADDR_WIDTH, AXI_DATA_WIDTH, AXI_ID_WIDTH, AXI_SIZE_WIDTH))
-    val aclk = Input(Bool())
-    val aresetn = Input(Bool())
-  })
-}
-
-class memory(AXI_ADDR_WIDTH : Int = 64, AXI_DATA_WIDTH: Int = 8, AXI_ID_WIDTH: Int = 4, AXI_SIZE_WIDTH: Int = 3) extends Module{
+/*class memory(AXI_ADDR_WIDTH : Int = 64, AXI_DATA_WIDTH: Int = 8, AXI_ID_WIDTH: Int = 4, AXI_SIZE_WIDTH: Int = 3) extends Module{
   val io = IO(new Bundle() {
     val data_out = Flipped(new axidata(AXI_ADDR_WIDTH, AXI_DATA_WIDTH, AXI_ID_WIDTH, AXI_SIZE_WIDTH))
     val count = Output(UInt(32.W))
@@ -125,7 +116,7 @@ class memory(AXI_ADDR_WIDTH : Int = 64, AXI_DATA_WIDTH: Int = 8, AXI_ID_WIDTH: I
   io.data_out.awaddr := io.base_addr + awaddr
 
   io.data_out.bready := 1.U
-}
+}*/
 
 class axiar(AXI_ADDR_WIDTH : Int = 44, AXI_ID_WIDTH: Int = 18, AXI_SIZE_WIDTH: Int = 3, NUM : Int = 1) extends Bundle {
   val araddr = Input(UInt((NUM * AXI_ADDR_WIDTH).W))
@@ -374,14 +365,14 @@ class WB_engine(AXI_ADDR_WIDTH : Int = 64, AXI_DATA_WIDTH: Int = 64, AXI_ID_WIDT
   io.ddr_b.bready := true.B
 }
 
-class axis_arbitrator(AXI_DATA_WIDTH: Int = 64) extends Module{
+class axis_arbitrator(AXIS_DATA_WIDTH: Int = 4, NUM : Int = 16, ELEMENT_WIDTH: Int = 4) extends Module{
   val io = IO(new Bundle() {
-    val xbar_in = (new streamdata(AXI_DATA_WIDTH, 4))
-    val ddr_out = Flipped(new streamdata(4, 4))
+    val xbar_in = (new streamdata(AXIS_DATA_WIDTH * NUM, ELEMENT_WIDTH))
+    val ddr_out = Flipped(new streamdata(AXIS_DATA_WIDTH, ELEMENT_WIDTH))
   })
 
-  val data = RegInit(0.U((AXI_DATA_WIDTH * 8).W))
-  val keep = RegInit(0.U((AXI_DATA_WIDTH / 4).W))
+  val data = RegInit(0.U((AXIS_DATA_WIDTH * NUM * 8).W))
+  val keep = RegInit(0.U((AXIS_DATA_WIDTH * NUM / ELEMENT_WIDTH).W))
 
   when(io.xbar_in.tvalid && io.xbar_in.tready){
     data := io.xbar_in.tdata
@@ -406,9 +397,11 @@ class axis_arbitrator(AXI_DATA_WIDTH: Int = 64) extends Module{
     keep(14) -> 0x4000.U,
     keep(15) -> 0x8000.U
   )*/
-  Array.tabulate(16)(x => (keep(x) -> (1.U(16.W) << x).asUInt())))
+  Array.tabulate(NUM)(x => (keep((x+1) * (AXIS_DATA_WIDTH / ELEMENT_WIDTH) - 1, x * (AXIS_DATA_WIDTH / ELEMENT_WIDTH)).orR() -> (1.U(NUM.W) << x).asUInt())))
   io.ddr_out.tvalid := select.orR()
-  io.ddr_out.tkeep := true.B
+  io.ddr_out.tkeep := Mux1H(
+    Seq.tabulate(NUM)(x => (select(x) -> keep((x + 1) * (AXIS_DATA_WIDTH / ELEMENT_WIDTH) - 1, x * (AXIS_DATA_WIDTH / ELEMENT_WIDTH))))
+  )
   io.ddr_out.tlast := true.B
   io.ddr_out.tdata := /*Mux1H(Seq(
     select(0) -> data(31, 0),
@@ -428,12 +421,16 @@ class axis_arbitrator(AXI_DATA_WIDTH: Int = 64) extends Module{
     select(14) -> data(15 * 32 - 1, 14 * 32),
     select(15) -> data(16 * 32 - 1, 15 * 32)
   ))*/
-  Mux1H(Seq.tabulate(16)(x => (select(x) -> data(x * 32 + 31, x * 32))))
+  Mux1H(Seq.tabulate(NUM)(x => (select(x) -> data((x + 1) * AXIS_DATA_WIDTH * 8 - 1, x * AXIS_DATA_WIDTH * 8))))
 
+  val next_keep = Wire(Vec(NUM, UInt((AXIS_DATA_WIDTH / ELEMENT_WIDTH).W)))
+  next_keep.zipWithIndex.map{
+    case(k, i) => (k := Mux(select(i), 0.U((AXIS_DATA_WIDTH / ELEMENT_WIDTH).W), ~0.U((AXIS_DATA_WIDTH / ELEMENT_WIDTH).W)))
+  }
   when(io.xbar_in.tvalid && io.xbar_in.tready){
     keep := io.xbar_in.tkeep
   }.elsewhen(io.ddr_out.tvalid && io.ddr_out.tready) {
-    keep := keep ^ select
+    keep := keep & next_keep.asUInt()
   }
 }
 
@@ -598,6 +595,78 @@ class embedding_mc(AXI_ADDR_WIDTH : Int = 64, AXI_DATA_WIDTH: Int = 64, AXI_ID_W
 }
 
 /*
+* PE ID is global addressable
+* MC ID is local addressable
+* */
+class broadcast_xbar(AXIS_DATA_WIDTH: Int = 64, SLAVE_NUM: Int, MASTER_NUM: Int) extends Module {
+  val io = IO(new Bundle {
+    val ddr_in = Vec(MASTER_NUM, new streamdata(AXIS_DATA_WIDTH, 4))
+    val ddr_out = Flipped(Vec(MASTER_NUM, (new streamdata(AXIS_DATA_WIDTH, 4))))
+    val pe_out = Flipped(Vec(SLAVE_NUM, (new streamdata(AXIS_DATA_WIDTH, 4))))
+    val pe_in = Vec(SLAVE_NUM, (new streamdata(4, 4)))
+  })
+
+  def vid_to_mcid(vid: UInt): UInt = {
+    vid
+  }
+
+  //pe_in to ddr_out direction
+  val PEs_tvalid = Wire(Vec(MASTER_NUM, Vec(SLAVE_NUM, Bool())))
+  val PEs_tkeep = Wire(Vec(MASTER_NUM, Vec(SLAVE_NUM, Bool())))
+  val PEs_tdata = Wire(Vec(SLAVE_NUM, UInt(32.W)))
+  io.pe_in.zipWithIndex.map{
+    case(pe, i) => {
+      PEs_tkeep.zipWithIndex.map{
+        case (k, j) => k(i) := Mux(j.U === vid_to_mcid(pe.tdata), pe.tkeep.asBool(), false.B)
+      }
+      PEs_tvalid.zipWithIndex.map{
+        case (v, j) => v(i) := Mux(j.U === vid_to_mcid(pe.tdata), pe.tvalid, false.B)
+      }
+      PEs_tdata(i) := pe.tdata
+      pe.tready := io.ddr_out(vid_to_mcid((pe.tdata))).tready
+    }
+  }
+  io.ddr_out.zipWithIndex.map{
+    case(ddr, i) => {
+      ddr.tkeep := PEs_tkeep(i).asUInt() & PEs_tvalid(i).asUInt()
+      ddr.tvalid := PEs_tvalid(i).reduce(_|_)
+      ddr.tlast := true.B
+      ddr.tdata := PEs_tdata.asUInt()
+    }
+  }
+
+  //ddr_in to pe_out direction
+  val arbitrator = Module(new axis_arbitrator(AXIS_DATA_WIDTH, MASTER_NUM, 4))
+  val ddr_data = Wire(Vec(MASTER_NUM, UInt((8 * AXIS_DATA_WIDTH).W)))
+  val ddr_keep = Wire(Vec(MASTER_NUM, UInt((AXIS_DATA_WIDTH / 4).W)))
+  val ddr_tvalid = Wire(Vec(MASTER_NUM, Bool()))
+  io.ddr_in.zipWithIndex.map{
+    case(ddr, i) => {
+      ddr_tvalid(i) := ddr.tvalid
+      ddr_keep(i) := Mux(ddr.tvalid, ddr.tkeep, 0.U)
+      ddr_data(i) := ddr.tdata
+      ddr.tready := arbitrator.io.xbar_in.tready
+    }
+  }
+  arbitrator.io.xbar_in.tkeep := ddr_keep.asUInt()
+  arbitrator.io.xbar_in.tdata := ddr_data.asUInt()
+  arbitrator.io.xbar_in.tlast := true.B
+  arbitrator.io.xbar_in.tvalid := ddr_tvalid.asUInt().orR()
+
+  val PES_tready = Wire(Vec(SLAVE_NUM, Bool()))
+  io.pe_out.zipWithIndex.map{
+    case(pe, i) => {
+      pe.tvalid := arbitrator.io.ddr_out.tvalid
+      pe.tkeep := arbitrator.io.ddr_out.tkeep
+      pe.tdata := arbitrator.io.ddr_out.tdata
+      pe.tlast := arbitrator.io.ddr_out.tlast
+      PES_tready(i) := pe.tready
+    }
+  }
+  arbitrator.io.ddr_out.tready := PES_tready.asUInt().andR()
+}
+
+/*
 * test_finish: PE has sent all current tier
 * end: there is no current tier for the level
 * start: the start signal for BFS from the root
@@ -618,7 +687,7 @@ class BFS(AXI_ADDR_WIDTH : Int = 64, AXI_DATA_WIDTH: Int = 64, AXI_ID_WIDTH: Int
   val io = IO(new Bundle() {
     val config = new axilitedata(AXI_ADDR_WIDTH)
     val PLmemory = Flipped(new axidata(AXI_ADDR_WIDTH, AXI_DATA_WIDTH, AXI_ID_WIDTH, AXI_SIZE_WIDTH))
-    //val PSmempory = Flipped(new axidata(64, AXI_DATA_WIDTH, AXI_ID_WIDTH, AXI_SIZE_WIDTH))
+    //val PSmempory = Flipped(Vec(4, new axidata(64, 16, AXI_ID_WIDTH, AXI_SIZE_WIDTH)))
   })
 
   //0 --- start register
@@ -641,29 +710,23 @@ class BFS(AXI_ADDR_WIDTH : Int = 64, AXI_DATA_WIDTH: Int = 64, AXI_ID_WIDTH: Int
   pl_mc.io.level_base_addr := Cat(controls.io.data(6), controls.io.data(5))
 
   val PEs = Seq.fill(16)(Module(new PE))
-  val PEs_tvalid = Wire(Vec(16, Bool()))
   val PEs_test_finish = Wire(Vec(16, Bool()))
   val PEs_end = Wire(Vec(16, Bool()))
-  val PEs_tkeep = Wire(Vec(16, Bool()))
-  val PEs_tdata = Wire(Vec(16, UInt(32.W)))
+  val bxbar = Module(new broadcast_xbar(64, 16, 1))
+  bxbar.io.ddr_in(0) <> pl_mc.io.xbar_out
+  pl_mc.io.xbar_in <> bxbar.io.ddr_out(0)
   PEs.zipWithIndex.map{
     case (pe, i) => {
-      pe.io.xbar_in <> pl_mc.io.xbar_out
-      PEs_tkeep(i) := pe.io.xbar_out.tkeep.asBool()
-      PEs_tdata(i) := pe.io.xbar_out.tdata
-      pe.io.xbar_out.tready := pl_mc.io.xbar_in.tready
+      pe.io.xbar_in <> bxbar.io.pe_out(i)//pl_mc.io.xbar_out
+      bxbar.io.pe_in(i) <> pe.io.xbar_out
+      //pe.io.xbar_out.tready := pl_mc.io.xbar_in.tready
       pe.io.start := start
       pe.io.level := level
       pe.io.root := controls.io.data(7)
-      PEs_tvalid(i) := pe.io.xbar_out.tvalid
       PEs_end(i) := pe.io.test_finish
       PEs_test_finish(i) := pe.io.test_finish
     }
   }
-  pl_mc.io.xbar_in.tkeep := PEs_tkeep.asUInt()
-  pl_mc.io.xbar_in.tvalid := PEs_tvalid.reduce(_|_)
-  pl_mc.io.xbar_in.tlast := true.B
-  pl_mc.io.xbar_in.tdata := PEs_tdata.asUInt()
 
   pl_mc.io.level := level
   when(PEs_end.reduce(_&_)) {
