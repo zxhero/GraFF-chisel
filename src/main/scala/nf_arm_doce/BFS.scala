@@ -217,6 +217,23 @@ class URAM(size : Int = 1024, width : Int = 32) extends BlackBox{
   })
 }
 
+class BRAM(size : Int = 1024 * 1024, width : Int = 1) extends BlackBox{
+  val io = IO(new Bundle() {
+    val addra = Input(UInt(log2Ceil(size).W))
+    val clka = Input(Bool())
+    val dina = Input(UInt(width.W))
+    val douta = Input(UInt(width.W))
+    val ena = Input(Bool())
+    val wea = Input(Bool())
+    val addrb = Input(UInt(log2Ceil(size).W))
+    val clkb = Input(Bool())
+    val dinb = Input(UInt(width.W))
+    val doutb = Input(UInt(width.W))
+    val enb = Input(Bool())
+    val web = Input(Bool())
+  })
+}
+
 class WB_engine(AXI_ADDR_WIDTH : Int = 64, AXI_DATA_WIDTH: Int = 64, AXI_ID_WIDTH: Int = 6, AXI_SIZE_WIDTH: Int = 3) extends Module{
   val io = IO(new Bundle() {
     val ddr_aw = Flipped(new axiaw(AXI_ADDR_WIDTH, AXI_ID_WIDTH, AXI_SIZE_WIDTH, 1))
@@ -229,7 +246,7 @@ class WB_engine(AXI_ADDR_WIDTH : Int = 64, AXI_DATA_WIDTH: Int = 64, AXI_ID_WIDT
     val level = Input(UInt(32.W))
   })
 
-  val buffer = Module(new URAM(524288,32))
+  val buffer = Module(new URAM(512 * 1024,32))
 
   //update buffer
   object sm extends ChiselEnum {
@@ -689,14 +706,68 @@ class broadcast_xbar(AXIS_DATA_WIDTH: Int = 64, SLAVE_NUM: Int, MASTER_NUM: Int)
 /*
 * end: there is no more vertexes for the level
 * */
-class Scatter(AXI_ADDR_WIDTH : Int = 64, AXI_DATA_WIDTH: Int = 4, AXI_ID_WIDTH: Int = 6, AXI_SIZE_WIDTH: Int = 3) extends BlackBox {
+class Scatter(AXIS_DATA_WIDTH: Int = 4, SID: Int) extends Module {
   val io = IO(new Bundle() {
     val xbar_in = new streamdata(64, 4)
-    val ddr_out = Flipped(new streamdata(4, 4))
+    val ddr_out = Flipped(new streamdata(AXIS_DATA_WIDTH, 4))
 
     //control path
     val end = Output(Bool())
   })
+
+  val bitmap = Module(new BRAM(1024 * 1024, 1))
+  val arbi = Module(new axis_arbitrator(4, 16, 4))
+
+  def vid_to_sid(vid: UInt, sid: UInt) : Bool = {
+    vid(31, 20) === sid
+  }
+
+  val filtered_keep = Wire(Vec(16, Bool()))
+  filtered_keep.zipWithIndex.map{
+    case(k, i) => {
+      k := Mux(io.xbar_in.get_ith_data(i)(31), true.B, io.xbar_in.tkeep(i) & vid_to_sid(io.xbar_in.get_ith_data(i), SID.asUInt()))
+    }
+  }
+
+  arbi.io.xbar_in.tkeep := filtered_keep.asUInt()
+  arbi.io.xbar_in.tdata := io.xbar_in.tdata
+  arbi.io.xbar_in.tvalid := io.xbar_in.tvalid
+  arbi.io.xbar_in.tlast := io.xbar_in.tlast
+  io.xbar_in.tready := arbi.io.xbar_in.tready
+
+  val vertex_in_fifo = Module(new fifo(32, 32))
+  val vertex_out_fifo = Module(new fifo(32, 32))
+  val wait_bitmap_fifo = Module(new fifo(1, 32))
+  //read or write bitmap ehnr this is not FIN
+  val bitmap_arvalid = vertex_in_fifo.io.empty === false.B & vertex_in_fifo.test_FIN() === false.B
+  val bitmap_rready = wait_bitmap_fifo.io.full === false.B
+  val bitmap_wvalid = wait_bitmap_fifo.io.empty === false.B & bitmap.io.douta === 0.U & wait_bitmap_fifo.test_FIN() === false.B
+
+  vertex_in_fifo.io.dataIn := arbi.io.ddr_out.tdata
+  vertex_in_fifo.io.writeFlag := arbi.io.ddr_out.tvalid
+  arbi.io.ddr_out.tready := vertex_in_fifo.io.full === false.B
+  bitmap.io.ena :=  bitmap_arvalid
+  bitmap.io.addra := vertex_in_fifo.io.dataOut(19, 0)
+  bitmap.io.clka := clock.asBool()
+  vertex_in_fifo.io.readFlag := bitmap_rready
+  wait_bitmap_fifo.io.writeFlag := vertex_in_fifo.io.empty === false.B
+  wait_bitmap_fifo.io.dataIn := vertex_in_fifo.io.dataOut
+  wait_bitmap_fifo.io.readFlag := vertex_out_fifo.io.full === false.B
+  vertex_out_fifo.io.writeFlag := bitmap_wvalid | (wait_bitmap_fifo.test_FIN())
+  vertex_out_fifo.io.dataIn := wait_bitmap_fifo.io.dataOut
+  bitmap.io.enb := bitmap_wvalid
+  bitmap.io.web := bitmap_wvalid
+  bitmap.io.clkb := clock.asBool()
+  bitmap.io.dinb := 1.U
+  bitmap.io.addrb := wait_bitmap_fifo.io.dataOut(19, 0)
+  vertex_out_fifo.io.readFlag := io.ddr_out.tready | vertex_out_fifo.test_FIN()
+  io.ddr_out.tvalid := vertex_out_fifo.io.empty === false.B & vertex_out_fifo.test_FIN() === false.B
+  io.ddr_out.tkeep := true.B
+  io.ddr_out.tlast := true.B
+  io.ddr_out.tdata := vertex_out_fifo.io.dataOut
+
+  //control path
+  io.end := vertex_out_fifo.test_FIN()
 }
 
 /*
@@ -824,7 +895,9 @@ class BFS(AXI_ADDR_WIDTH : Int = 64, AXI_DATA_WIDTH: Int = 64, AXI_ID_WIDTH: Int
   val start = controls.io.data(0)(0)
 
   val pl_mc = Module(new multi_port_mc(AXI_ADDR_WIDTH, AXI_DATA_WIDTH, AXI_ID_WIDTH, AXI_SIZE_WIDTH))
-  val Scatters = Seq.fill(16)(Module(new Scatter))
+  val Scatters = Seq.tabulate(16)(
+    i => Module(new Scatter(4, i))
+  )
   val Gathers = Module(new Gather())
   val Applys = Module(new Apply())
   val Broadcasts = Module(new Broadcast())

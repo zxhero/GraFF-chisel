@@ -10,6 +10,11 @@ class streamdata(AXIS_DATA_WIDTH: Int = 8, ELEMENT_WIDTH: Int = 1) extends Bundl
   val tlast = Input(Bool())
   val tvalid = Input(Bool())
   val tready = Output(Bool())
+
+  def get_ith_data(i: Int): UInt = {
+    assert(i < (AXIS_DATA_WIDTH / ELEMENT_WIDTH))
+    tdata((i + 1) * ELEMENT_WIDTH * 8 - 1, i * ELEMENT_WIDTH * 8)
+  }
 }
 
 class axidata(AXI_ADDR_WIDTH : Int = 44, AXI_DATA_WIDTH: Int = 16, AXI_ID_WIDTH: Int = 18, AXI_SIZE_WIDTH: Int = 3, NUM : Int = 1) extends Bundle {

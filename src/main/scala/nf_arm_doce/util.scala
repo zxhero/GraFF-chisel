@@ -15,14 +15,18 @@ class fifo(val size : Int, val width : Int) extends Module {
 
   val count = RegInit(0.U((log2Ceil(size)+1).W))
   val mem = Mem(size, UInt(width.W))
-  val wPointer = RegInit(0.U((log2Ceil(size)).W))
-  val rPointer = RegInit(0.U((log2Ceil(size)).W))
+  val wPointer = RegInit(0.U((log2Ceil(size) + 1).W))
+  val rPointer = RegInit(0.U((log2Ceil(size)+ 1).W))
   val dataOut = RegInit(0.U(width.W))
 
   io.rptr := rPointer
 
   def indexAdd(index : UInt) : UInt = {
       Mux(index === (size - 1).U, 0.U, index + 1.U)
+  }
+
+  def test_FIN() : Bool = {
+    io.dataOut((width - 1).U) === 1.U && io.empty === false.B
   }
 
   when(io.writeFlag === true.B && io.readFlag === true.B) {
