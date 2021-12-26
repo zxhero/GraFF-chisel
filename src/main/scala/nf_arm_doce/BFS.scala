@@ -850,7 +850,11 @@ class multi_port_mc(AXI_ADDR_WIDTH : Int = 64, AXI_DATA_WIDTH: Int = 64, AXI_ID_
   }*/
 }
 
-class controller (AXI_ADDR_WIDTH : Int = 64) extends BlackBox{
+/*
+* traveled_edges: updated every super step
+* unvisited_size: unvisited vertex in tiers
+* */
+class controller (AXI_ADDR_WIDTH : Int = 64) extends Module{
   val io = IO(new Bundle() {
     val data = Output(Vec(32, UInt(32.W)))
     val fin = Input(Vec(16, (Bool())))
@@ -875,13 +879,60 @@ class controller (AXI_ADDR_WIDTH : Int = 64) extends BlackBox{
   //11 --- tier2_base_addr(63, 32)
   //12 --- traveled edges(63, 32)
   //13 --- traveled edges(31, 0)
-  /*val controls = Module(new LookupTable(depth = 32, AXI_ADDR_WIDTH = AXI_ADDR_WIDTH))
+  val controls = Module(new LookupTable(depth = 32, AXI_ADDR_WIDTH = AXI_ADDR_WIDTH))
   val level = RegInit(0.U(32.W))
-  when(PEs_end.reduce(_&_)) {
-    level := 0.U
-  }.elsewhen(PEs_test_finish.reduce(_&_) && Applys.io.write_finish && Broadcasts.io.read_finish){
+  object sm extends ChiselEnum {
+    val idole = Value(0x0.U)
+    val exe  = Value(0x1.U) // i "load"  -> 000_0011
+    val fin   = Value(0x2.U) // i "imm"   -> 001_0011
+    val end = Value(0x3.U)
+  }
+  val status = RegInit(sm.idole)
+  val start = controls.io.data(0)(0)
+  val FIN = RegInit(VecInit(Seq.fill(16)(false.B)))
+  val new_tep = Cat(controls.io.data(12), controls.io.data(13)) + io.traveled_edges
+
+  controls.config <> io.config
+  controls.io.writeFlag(0) := status === sm.end | status === sm.fin
+  controls.io.wptr(0) := Mux(status === sm.end, 0.U, 12.U)
+  controls.io.dataIn(0) := Mux(status === sm.end, 2.U, new_tep(63, 32))
+  controls.io.writeFlag(1) := status === sm.fin
+  controls.io.wptr(1) := 13.U
+  controls.io.dataIn(1) := new_tep(31, 0)
+
+  when(status === sm.idole && start){
+    status := sm.exe
+  }.elsewhen(status === sm.exe && FIN.reduce(_&_)){
+    status := sm.fin
+  }.elsewhen(status === sm.fin){
+    when(io.unvisited_size === 0.U){
+      status := sm.end
+    }.otherwise{
+      status := sm.exe
+    }
+  }.elsewhen(status === sm.end){
+    status := sm.idole
+  }
+
+  FIN.zipWithIndex.map{
+    case(f, i) => {
+      when(io.fin(i)){
+        f := true.B
+      }.elsewhen(io.signal){
+        f := false.B
+      }
+    }
+  }
+
+  when(status === sm.fin){
     level := level + 1.U
-  }*/
+  }.elsewhen(status === sm.idole && start){
+    level := 0.U
+  }
+
+  io.signal := status === sm.idole && start || status === sm.fin
+  io.data := controls.io.data
+  io.level := level
 }
 
 class BFS(AXI_ADDR_WIDTH : Int = 64, AXI_DATA_WIDTH: Int = 64, AXI_ID_WIDTH: Int = 6, AXI_SIZE_WIDTH: Int = 3) extends Module{
@@ -892,7 +943,7 @@ class BFS(AXI_ADDR_WIDTH : Int = 64, AXI_DATA_WIDTH: Int = 64, AXI_ID_WIDTH: Int
   })
 
   val controls = Module(new controller(AXI_ADDR_WIDTH))
-  val start = controls.io.data(0)(0)
+
 
   val pl_mc = Module(new multi_port_mc(AXI_ADDR_WIDTH, AXI_DATA_WIDTH, AXI_ID_WIDTH, AXI_SIZE_WIDTH))
   val Scatters = Seq.tabulate(16)(
