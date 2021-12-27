@@ -8,116 +8,6 @@ import chisel3.util._
 import utils._
 import numa.LookupTable
 
-/*class memory(AXI_ADDR_WIDTH : Int = 64, AXI_DATA_WIDTH: Int = 8, AXI_ID_WIDTH: Int = 4, AXI_SIZE_WIDTH: Int = 3) extends Module{
-  val io = IO(new Bundle() {
-    val data_out = Flipped(new axidata(AXI_ADDR_WIDTH, AXI_DATA_WIDTH, AXI_ID_WIDTH, AXI_SIZE_WIDTH))
-    val count = Output(UInt(32.W))
-    val base_addr = Input(UInt(64.W))
-    //val data_in = (new axidata(64, AXI_DATA_WIDTH, AXI_ID_WIDTH, AXI_SIZE_WIDTH))
-  })
-
-  val xbar = Module(new xbar(AXI_ADDR_WIDTH, AXI_DATA_WIDTH, AXI_ID_WIDTH, AXI_SIZE_WIDTH))
-  xbar.io.aclk := clock.asBool()
-  xbar.io.aresetn := ~reset.asBool()
-  xbar.io.m_axi.rlast := io.data_out.rlast
-  xbar.io.m_axi.rvalid := io.data_out.rvalid
-  xbar.io.m_axi.rdata := io.data_out.rdata
-  xbar.io.m_axi.rid := io.data_out.rid
-  xbar.io.m_axi.rresp := io.data_out.rresp
-  io.data_out.rready := xbar.io.m_axi.rready
-
-  io.data_out.araddr := xbar.io.m_axi.araddr
-  io.data_out.arvalid := xbar.io.m_axi.arvalid
-  io.data_out.arid := xbar.io.m_axi.arid
-  io.data_out.arsize := xbar.io.m_axi.arsize
-  io.data_out.arlen := xbar.io.m_axi.arlen
-  io.data_out.arlock := xbar.io.m_axi.arlock
-  io.data_out.arburst := xbar.io.m_axi.arburst
-  xbar.io.m_axi.arready := io.data_out.arready
-  //read offset array
-  val count = RegInit(0.U(32.W))
-  val offset_arvalid = RegInit(false.B)
-  when(offset_arvalid && xbar.io.s_axi.arready(1) && xbar.io.s_axi.rvalid(1) && xbar.io.s_axi.rready(1) && xbar.io.s_axi.rlast(1)){
-    count := count
-  }.elsewhen(offset_arvalid && xbar.io.s_axi.arready(1)) {
-    count := count + 1.U
-  }.elsewhen(xbar.io.s_axi.rvalid(1) && xbar.io.s_axi.rready(1) && xbar.io.s_axi.rlast(1)) {
-    count := count - 1.U
-  }
-
-  val full = (count >= 63.U)
-  when(full.asBool()){
-    offset_arvalid := false.B
-  }.otherwise{
-    offset_arvalid := true.B
-  }
-
-  io.count := count
-
-  //read edge array
-  val edge_count = RegInit(0.U(32.W))
-  val edge_arvalid =  edge_count > 0.U
-    when(xbar.io.s_axi.rvalid(1) && xbar.io.s_axi.rready(1) && xbar.io.s_axi.rlast(1)
-    && edge_arvalid && xbar.io.s_axi.arready(0)){
-      edge_count := edge_count
-    }.elsewhen(xbar.io.s_axi.rvalid(1) && xbar.io.s_axi.rready(1) && xbar.io.s_axi.rlast(1)){
-    edge_count := edge_count + 1.U
-  }.elsewhen(edge_arvalid && xbar.io.s_axi.arready(0)) {
-    edge_count := edge_count - 1.U
-  }
-
-  xbar.io.s_axi.arvalid := Cat(offset_arvalid & !full, edge_arvalid)
-  xbar.io.s_axi.arid := Cat(count(AXI_ID_WIDTH-1, 0), edge_count(AXI_ID_WIDTH-1, 0))
-  xbar.io.s_axi.araddr := Cat(io.base_addr, (io.base_addr + 0x10000.U))
-  xbar.io.s_axi.arburst := Cat(1.U(2.W), 1.U(2.W))
-  xbar.io.s_axi.arlen := Cat(0.U(8.W), 7.U(8.W))
-  xbar.io.s_axi.arsize := Cat(log2Ceil(AXI_DATA_WIDTH).U(AXI_SIZE_WIDTH.W), log2Ceil(AXI_DATA_WIDTH).U(AXI_SIZE_WIDTH.W))
-  xbar.io.s_axi.arlock := 0.U(2.W)
-
-  xbar.io.s_axi.rready := Cat(1.U(1.W), 1.U(1.W))
-
-  //write value array
-  val wcount = RegInit(0.U(32.W))
-  when(xbar.io.s_axi.rvalid(1) && xbar.io.s_axi.rready(1) && xbar.io.s_axi.rlast(1)
-    && io.data_out.wvalid.asBool() && io.data_out.wready.asBool()){
-    wcount := wcount
-  }.elsewhen(xbar.io.s_axi.rvalid(1) && xbar.io.s_axi.rready(1) && xbar.io.s_axi.rlast(1)){
-    wcount := wcount + 1.U
-  }.elsewhen(io.data_out.wvalid.asBool() && io.data_out.wready.asBool()) {
-    wcount := wcount - 1.U
-  }
-
-  io.data_out.wvalid := wcount > 0.U
-  io.data_out.wlast := 1.U
-  io.data_out.wdata := 0.U
-  io.data_out.wstrb := VecInit(Seq.fill(AXI_DATA_WIDTH)(1.U(1.W))).asUInt()
-
-  val awcount = RegInit(0.U(32.W))
-  when(xbar.io.s_axi.rvalid(1) && xbar.io.s_axi.rready(1) && xbar.io.s_axi.rlast(1)
-    && io.data_out.awvalid.asBool() && io.data_out.awready.asBool()){
-    awcount := awcount
-  }.elsewhen(xbar.io.s_axi.rvalid(1) && xbar.io.s_axi.rready(1) && xbar.io.s_axi.rlast(1)){
-    awcount := awcount + 1.U
-  }.elsewhen(io.data_out.awvalid.asBool() && io.data_out.awready.asBool()) {
-    awcount := awcount - 1.U
-  }
-
-  val awaddr = RegInit(0.U(30.W))
-  when(io.data_out.awvalid.asBool() && io.data_out.awready.asBool()) {
-    awaddr := awaddr + 0x1000.U
-  }
-
-  io.data_out.awvalid := awcount > 0.U
-  io.data_out.awid := awcount(AXI_ID_WIDTH-1, 0)
-  io.data_out.awsize := log2Ceil(AXI_DATA_WIDTH).U(AXI_SIZE_WIDTH.W)
-  io.data_out.awlen := 0.U
-  io.data_out.awburst := 1.U(2.W)
-  io.data_out.awlock := 0.U
-  io.data_out.awaddr := io.base_addr + awaddr
-
-  io.data_out.bready := 1.U
-}*/
-
 class axiar(AXI_ADDR_WIDTH : Int = 44, AXI_ID_WIDTH: Int = 18, AXI_SIZE_WIDTH: Int = 3, NUM : Int = 1) extends Bundle {
   val araddr = Input(UInt((NUM * AXI_ADDR_WIDTH).W))
   val arid = Input(UInt((NUM * AXI_ID_WIDTH).W))
@@ -443,49 +333,15 @@ class axis_arbitrator(AXIS_DATA_WIDTH: Int = 4, NUM : Int = 16, ELEMENT_WIDTH: I
   }
   io.xbar_in.tready := ~(keep.orR())
 
-  val select = MuxCase(0.U, /*Array(
-    keep(0) -> 1.U,
-    keep(1) -> 2.U,
-    keep(2) -> 4.U,
-    keep(3) -> 8.U,
-    keep(4) -> 0x0010.U,
-    keep(5) -> 0x0020.U,
-    keep(6) -> 0x0040.U,
-    keep(7) -> 0x0080.U,
-    keep(8) -> 0x0100.U,
-    keep(9) -> 0x0200.U,
-    keep(10) -> 0x0400.U,
-    keep(11) -> 0x0800.U,
-    keep(12) -> 0x1000.U,
-    keep(13) -> 0x2000.U,
-    keep(14) -> 0x4000.U,
-    keep(15) -> 0x8000.U
-  )*/
-  Array.tabulate(NUM)(x => (keep((x+1) * (AXIS_DATA_WIDTH / ELEMENT_WIDTH) - 1, x * (AXIS_DATA_WIDTH / ELEMENT_WIDTH)).orR() -> (1.U(NUM.W) << x).asUInt())))
+  val select = MuxCase(0.U,
+    Array.tabulate(NUM)(x => (keep((x+1) * (AXIS_DATA_WIDTH / ELEMENT_WIDTH) - 1, x * (AXIS_DATA_WIDTH / ELEMENT_WIDTH)).orR() -> (1.U(NUM.W) << x).asUInt())))
   io.ddr_out.tvalid := select.orR()
   io.ddr_out.tkeep := Mux1H(
     Seq.tabulate(NUM)(x => (select(x) -> keep((x + 1) * (AXIS_DATA_WIDTH / ELEMENT_WIDTH) - 1, x * (AXIS_DATA_WIDTH / ELEMENT_WIDTH))))
   )
   io.ddr_out.tlast := true.B
-  io.ddr_out.tdata := /*Mux1H(Seq(
-    select(0) -> data(31, 0),
-    select(1) -> data(63, 32),
-    select(2) -> data(3 * 32 - 1, 2 * 32),
-    select(3) -> data(4 * 32 - 1, 3 * 32),
-    select(4) -> data(5 * 32 - 1, 4 * 32),
-    select(5) -> data(6 * 32 - 1, 5 * 32),
-    select(6) -> data(7 * 32 - 1, 6 * 32),
-    select(7) -> data(8 * 32 - 1, 7 * 32),
-    select(8) -> data(9 * 32 - 1, 8 * 32),
-    select(9) -> data(10 * 32 - 1, 9 * 32),
-    select(10) -> data(11 * 32 - 1, 10 * 32),
-    select(11) -> data(12 * 32 - 1, 11 * 32),
-    select(12) -> data(13 * 32 - 1, 12 * 32),
-    select(13) -> data(14 * 32 - 1, 13 * 32),
-    select(14) -> data(15 * 32 - 1, 14 * 32),
-    select(15) -> data(16 * 32 - 1, 15 * 32)
-  ))*/
-  Mux1H(Seq.tabulate(NUM)(x => (select(x) -> data((x + 1) * AXIS_DATA_WIDTH * 8 - 1, x * AXIS_DATA_WIDTH * 8))))
+  io.ddr_out.tdata :=
+    Mux1H(Seq.tabulate(NUM)(x => (select(x) -> data((x + 1) * AXIS_DATA_WIDTH * 8 - 1, x * AXIS_DATA_WIDTH * 8))))
 
   val next_keep = Wire(Vec(NUM, UInt((AXIS_DATA_WIDTH / ELEMENT_WIDTH).W)))
   next_keep.zipWithIndex.map{
@@ -508,7 +364,7 @@ class Gather(AXI_DATA_WIDTH: Int = 64) extends Module{
   })
 
   //front end of upward
-  val vertex_in_buffer = Module(new fifo(32, 512 + 16))
+  val vertex_in_buffer = Module(new fifo(2, 512 + 16))
   vertex_in_buffer.io.dataIn := Cat(io.ddr_in.tdata, io.ddr_in.tkeep)
   vertex_in_buffer.io.writeFlag := io.ddr_in.tvalid
   io.ddr_in.tready := vertex_in_buffer.io.full === false.B
@@ -770,11 +626,84 @@ class Scatter(AXIS_DATA_WIDTH: Int = 4, SID: Int) extends Module {
   io.end := vertex_out_fifo.test_FIN()
 }
 
+class Collector(AXI_DATA_WIDTH: Int = 64) extends Module{
+  val io = IO(new Bundle() {
+    val in = Vec(16, (new streamdata(4, 4)))
+    val out = Flipped(new streamdata(AXI_DATA_WIDTH, 4))
+  })
+
+  val collector_fifos = Seq.tabulate(16)(
+    i => Module(new BRAM_fifo(4, 32, ("collector_fifo" + i.toString)))
+  )
+  val counter = RegInit(0.U(log2Ceil(16).W))
+  val collector_data = Wire(Vec(16, UInt(32.W)))
+  val sorted_data = Wire(Vec(16, UInt(32.W)))
+  val sorted_valid = Wire(Vec(16, Bool()))
+  val steps = (Seq.tabulate(16)(
+    i => {
+      Seq.tabulate(i + 1)(x => io.in(x).tvalid.asTypeOf(UInt(4.W))).reduce(_+_)
+    }
+  ))
+
+  def indexAdd(index : UInt, step : UInt) : UInt = {
+    Mux(index + step >= 16.U, index + step - 16.U, index + step)
+  }
+  def indexSub(index1 : UInt, index2 : UInt) : UInt = {
+    Mux(index1 <= index2, index2 - index1, 16.U - index1 + index2)
+  }
+
+  io.in.zipWithIndex.map{
+    case(in, i) => {
+      in.tready := Seq.tabulate(16)(i => collector_fifos(i).io.full === false.B).reduce(_&_)
+    }
+  }
+  sorted_data.zipWithIndex.map{
+    case (s, i) => {
+      s := MuxCase(0.U,
+        Array.tabulate(16)(
+          x => (steps(x) === (i + 1).U, io.in(x).tdata)
+        ))
+    }
+  }
+  sorted_valid.zipWithIndex.map{
+    case (s, i) => {
+      s := MuxCase(false.B,
+        Array.tabulate(16)(
+          x => (steps(x) === (i + 1).U, io.in(x).tvalid)
+        ))
+    }
+  }
+
+  when(sorted_valid.reduce(_|_)){
+    counter := indexAdd(counter, MuxCase(0.U, Seq.tabulate(16)(
+      x => (io.in(16 - x - 1).tready && sorted_valid(16 - x - 1), (x + 1).U)
+    )))
+  }
+
+  collector_fifos.zipWithIndex.map{
+    case (f, i) => {
+      val fifo_in_data = Mux1H(Seq.tabulate(16)(x => (indexSub(counter, i.U) === x.U, sorted_data(x))))
+      val fifo_in_valid = Mux1H(Seq.tabulate(16)(x => (indexSub(counter, i.U) === x.U, sorted_valid(x))))
+      f.io.din := fifo_in_data
+      f.io.wr_en := fifo_in_valid
+      collector_data(i) := f.io.dout
+      f.io.clk := clock.asBool()
+      f.io.srst := reset.asBool()
+      f.io.rd_en := io.out.tvalid & io.out.tready
+    }
+  }
+
+  io.out.tvalid := Seq.tabulate(16)(i => collector_fifos(i).io.empty === false.B).reduce(_&_)
+  io.out.tdata := collector_data.asUInt()
+  io.out.tlast := true.B
+  io.out.tkeep := 0xffff.U(16.W)
+}
+
 /*
 * mc send FIN when no more data in current tier FIFO
 * FIN: vid[31] = 1
 * */
-class multi_port_mc(AXI_ADDR_WIDTH : Int = 64, AXI_DATA_WIDTH: Int = 64, AXI_ID_WIDTH: Int = 6, AXI_SIZE_WIDTH: Int = 3) extends BlackBox{
+class multi_port_mc(AXI_ADDR_WIDTH : Int = 64, AXI_DATA_WIDTH: Int = 64, AXI_ID_WIDTH: Int = 6, AXI_SIZE_WIDTH: Int = 3) extends BlackBox {
   val io = IO(new Bundle() {
     val cacheable_out = Flipped(new streamdata(AXI_DATA_WIDTH, 4))
     val cacheable_in = Vec(16, (new streamdata(4, 4)))
@@ -788,6 +717,12 @@ class multi_port_mc(AXI_ADDR_WIDTH : Int = 64, AXI_DATA_WIDTH: Int = 64, AXI_ID_
     val root = Input(UInt(32.W))
     val signal = Input(Bool())
   })
+
+  //val tier_fifo_0 = Module(new BRAM_fifo(16, 512, "tier_fifo_0"))
+  //val tier_fifo_1 = Module(new BRAM_fifo(16, 512, "tier_fifo_1"))
+  //val arbitrator_0 = Module(new axi_arbitrator())
+
+
   /*val counter = RegInit(0.U(32.W))
   val addr = RegInit(0.U(AXI_ADDR_WIDTH.W))
   when(io.step_start){

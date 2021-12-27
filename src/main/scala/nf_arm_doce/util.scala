@@ -83,3 +83,19 @@ class regFile (val size : Int, val width : Int) extends Module {
     regs(io.wptr) := io.dataIn
   }
 }
+
+class BRAM_fifo(val size : Int, val width : Int, val mname : String) extends BlackBox{
+  val io = IO(new Bundle() {
+    val full = Output(Bool())
+    val din = Input(UInt(width.W))
+    val wr_en = Input(Bool())
+    val empty = Output(Bool())
+    val dout = Output(UInt(width.W))
+    val rd_en = Input(Bool())
+    val data_count = Output(UInt((log2Ceil(size) + 1).W))
+    val clk = Input(Bool())
+    val srst = Input(Bool())
+  })
+
+  override def desiredName = mname
+}
