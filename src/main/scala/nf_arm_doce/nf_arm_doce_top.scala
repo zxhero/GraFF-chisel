@@ -1,6 +1,7 @@
 package nf_arm_doce
 
 import chisel3._
+import chisel3.experimental.noPrefix
 import chisel3.util.Decoupled
 import chisel3.util._
 
@@ -71,6 +72,44 @@ class axidata(AXI_ADDR_WIDTH : Int = 44, AXI_DATA_WIDTH: Int = 16, AXI_ID_WIDTH:
   val b = new axib(AXI_ID_WIDTH, NUM)
 }
 
+class axidata_blackbox(AXI_ADDR_WIDTH : Int = 44, AXI_DATA_WIDTH: Int = 16, AXI_ID_WIDTH: Int = 18, AXI_SIZE_WIDTH: Int = 3, NUM : Int = 1) extends Bundle {
+  val awaddr = Input(UInt((NUM * AXI_ADDR_WIDTH).W))
+  val awid = Input(UInt((NUM * AXI_ID_WIDTH).W))
+  val awlen = Input(UInt((NUM * 8).W))
+  val awsize = Input(UInt((NUM * AXI_SIZE_WIDTH).W))
+  val awburst = Input(UInt((NUM * 2).W))
+  val awlock = Input(UInt((NUM * 1).W))
+  val awvalid = Input(UInt((NUM * 1).W))
+  val awready = Output(UInt((NUM * 1).W))
+
+  val araddr = Input(UInt((NUM * AXI_ADDR_WIDTH).W))
+  val arid = Input(UInt((NUM * AXI_ID_WIDTH).W))
+  val arlen = Input(UInt((NUM * 8).W))
+  val arsize = Input(UInt((NUM * AXI_SIZE_WIDTH).W))
+  val arburst = Input(UInt((NUM * 2).W))
+  val arlock = Input(UInt((NUM * 1).W))
+  val arvalid = Input(UInt((NUM * 1).W))
+  val arready = Output(UInt((NUM * 1).W))
+
+  val wdata = Input(UInt((NUM*8*AXI_DATA_WIDTH).W))
+  val wstrb = Input(UInt((NUM*AXI_DATA_WIDTH).W))
+  val wlast = Input(UInt((NUM * 1).W))
+  val wvalid = Input(UInt((NUM * 1).W))
+  val wready = Output(UInt((NUM * 1).W))
+
+  val rdata = Output(UInt((NUM*8*AXI_DATA_WIDTH).W))
+  val rid = Output(UInt((NUM * AXI_ID_WIDTH).W))
+  val rlast = Output(UInt((NUM * 1).W))
+  val rresp = Output(UInt((NUM * 2).W))
+  val rvalid = Output(UInt((NUM * 1).W))
+  val rready = Input(UInt((NUM * 1).W))
+
+  val bresp = Output(UInt((NUM * 2).W))
+  val bid = Output(UInt((NUM * AXI_ID_WIDTH).W))
+  val bvalid = Output(UInt((NUM * 1).W))
+  val bready = Input(UInt((NUM * 1).W))
+}
+
 class axilitedata(AXI_ADDR_WIDTH : Int = 44) extends Bundle {
   val awaddr = Input(UInt(AXI_ADDR_WIDTH.W))
   val awvalid = Input(Bool())
@@ -100,8 +139,8 @@ class doceIO (AXI_ADDR_WIDTH : Int = 44, AXI_DATA_WIDTH: Int = 16, AXI_ID_WIDTH:
   val doce_axis_txd = Flipped((new streamdata()))
   val reset = Input(Bool())
   val clk = Input(Bool())
-  val doce_axi_slave = new axidata(AXI_ADDR_WIDTH, AXI_DATA_WIDTH, AXI_ID_WIDTH, AXI_SIZE_WIDTH)
-  val doce_axi_master = Flipped(new axidata(AXI_ADDR_WIDTH, AXI_DATA_WIDTH, AXI_ID_WIDTH + 4, AXI_SIZE_WIDTH))
+  val doce_axi_slave = new axidata_blackbox(AXI_ADDR_WIDTH, AXI_DATA_WIDTH, AXI_ID_WIDTH, AXI_SIZE_WIDTH)
+  val doce_axi_master = Flipped(new axidata_blackbox(AXI_ADDR_WIDTH, AXI_DATA_WIDTH, AXI_ID_WIDTH + 4, AXI_SIZE_WIDTH))
   val doce_axi_lite_slave = new axilitedata(AXI_ADDR_WIDTH)
   val m_axi_doce_mac = Flipped(new axilitedata(AXI_ADDR_WIDTH))
   val doce_mac_addr = Input(UInt(48.W))
@@ -125,8 +164,8 @@ class mpsocIO () extends Bundle{
   val gt_ref_clk_clk_p = Input(Bool())
   val gt_ref_clk_clk_n = Input(Bool())
   val doce_axi_lite_slave = Flipped(new axilitedata(40))
-  val doce_axi_master = (new axidata(32, 16, 6, 3))
-  val doce_axi_slave = Flipped(new axidata(40, 16, 0, 3))
+  val doce_axi_master = (new axidata_blackbox(32, 16, 6, 3))
+  val doce_axi_slave = Flipped(new axidata_blackbox(40, 16, 0, 3))
   val doce_mac_addr = Output(UInt(48.W))
   val doce_ip_addr = Output(UInt(32.W))
   val gt_txusrclk = Output(Bool())
