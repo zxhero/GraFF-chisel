@@ -2,57 +2,10 @@ package bfs
 
 import chisel3._
 import chisel3.experimental.ChiselEnum
-import nf_arm_doce.{axidata, axilitedata, streamdata}
-import chisel3.util.Decoupled
+import nf_arm_doce._
 import chisel3.util._
 import utils._
 import numa.LookupTable
-
-class axiar(AXI_ADDR_WIDTH : Int = 44, AXI_ID_WIDTH: Int = 18, AXI_SIZE_WIDTH: Int = 3, NUM : Int = 1) extends Bundle {
-  val araddr = Input(UInt((NUM * AXI_ADDR_WIDTH).W))
-  val arid = Input(UInt((NUM * AXI_ID_WIDTH).W))
-  val arlen = Input(UInt((NUM * 8).W))
-  val arsize = Input(UInt((NUM * AXI_SIZE_WIDTH).W))
-  val arburst = Input(UInt((NUM * 2).W))
-  val arlock = Input(UInt((NUM * 1).W))
-  val arvalid = Input(UInt((NUM * 1).W))
-  val arready = Output(UInt((NUM * 1).W))
-}
-
-class axiaw(AXI_ADDR_WIDTH : Int = 44, AXI_ID_WIDTH: Int = 18, AXI_SIZE_WIDTH: Int = 3, NUM : Int = 1) extends Bundle {
-  val awaddr = Input(UInt((NUM * AXI_ADDR_WIDTH).W))
-  val awid = Input(UInt((NUM * AXI_ID_WIDTH).W))
-  val awlen = Input(UInt((NUM * 8).W))
-  val awsize = Input(UInt((NUM * AXI_SIZE_WIDTH).W))
-  val awburst = Input(UInt((NUM * 2).W))
-  val awlock = Input(UInt((NUM * 1).W))
-  val awvalid = Input(UInt((NUM * 1).W))
-  val awready = Output(UInt((NUM * 1).W))
-}
-
-class axiw(AXI_DATA_WIDTH: Int = 16, NUM : Int = 1) extends Bundle {
-  val wdata = Input(UInt((NUM*8*AXI_DATA_WIDTH).W))
-  val wstrb = Input(UInt((NUM*AXI_DATA_WIDTH).W))
-  val wlast = Input(UInt((NUM * 1).W))
-  val wvalid = Input(UInt((NUM * 1).W))
-  val wready = Output(UInt((NUM * 1).W))
-}
-
-class axib(AXI_ID_WIDTH: Int = 18, NUM : Int = 1) extends Bundle {
-  val bresp = Output(UInt((NUM * 2).W))
-  val bid = Output(UInt((NUM * AXI_ID_WIDTH).W))
-  val bvalid = Output(UInt((NUM * 1).W))
-  val bready = Input(UInt((NUM * 1).W))
-}
-
-class axir(AXI_DATA_WIDTH: Int = 16, AXI_ID_WIDTH: Int = 18, NUM : Int = 1) extends Bundle{
-  val rdata = Output(UInt((NUM*8*AXI_DATA_WIDTH).W))
-  val rid = Output(UInt((NUM * AXI_ID_WIDTH).W))
-  val rlast = Output(UInt((NUM * 1).W))
-  val rresp = Output(UInt((NUM * 2).W))
-  val rvalid = Output(UInt((NUM * 1).W))
-  val rready = Input(UInt((NUM * 1).W))
-}
 
 class axi_arbitrator(AXI_ADDR_WIDTH : Int = 64, AXI_DATA_WIDTH: Int = 64, AXI_ID_WIDTH: Int = 4, AXI_SIZE_WIDTH: Int = 3, NUM : Int = 2) extends  Module {
   val io = IO(new Bundle() {
@@ -630,6 +583,7 @@ class Collector(AXI_DATA_WIDTH: Int = 64) extends Module{
   val io = IO(new Bundle() {
     val in = Vec(16, (new streamdata(4, 4)))
     val out = Flipped(new streamdata(AXI_DATA_WIDTH, 4))
+    val flush = Input(Bool())
   })
 
   val collector_fifos = Seq.tabulate(16)(
@@ -693,22 +647,23 @@ class Collector(AXI_DATA_WIDTH: Int = 64) extends Module{
     }
   }
 
-  io.out.tvalid := Seq.tabulate(16)(i => collector_fifos(i).io.empty === false.B).reduce(_&_)
+  io.out.tvalid := Mux(io.flush, Seq.tabulate(16)(i => collector_fifos(i).io.empty === false.B).reduce(_|_),
+    Seq.tabulate(16)(i => collector_fifos(i).io.empty === false.B).reduce(_&_))
   io.out.tdata := collector_data.asUInt()
   io.out.tlast := true.B
-  io.out.tkeep := 0xffff.U(16.W)
+  io.out.tkeep := (VecInit.tabulate(16)(i => collector_fifos(i).io.empty === false.B)).asUInt()
 }
 
 /*
 * mc send FIN when no more data in current tier FIFO
 * FIN: vid[31] = 1
 * */
-class multi_port_mc(AXI_ADDR_WIDTH : Int = 64, AXI_DATA_WIDTH: Int = 64, AXI_ID_WIDTH: Int = 6, AXI_SIZE_WIDTH: Int = 3) extends BlackBox {
+class multi_port_mc(AXI_ADDR_WIDTH : Int = 64, AXI_DATA_WIDTH: Int = 64, AXI_ID_WIDTH: Int = 6, AXI_SIZE_WIDTH: Int = 3) extends Module {
   val io = IO(new Bundle() {
     val cacheable_out = Flipped(new streamdata(AXI_DATA_WIDTH, 4))
     val cacheable_in = Vec(16, (new streamdata(4, 4)))
     val non_cacheable_in = new axidata(AXI_ADDR_WIDTH, AXI_DATA_WIDTH, AXI_ID_WIDTH, AXI_SIZE_WIDTH)
-    val ddr_out = Flipped(new axidata(AXI_ADDR_WIDTH, AXI_DATA_WIDTH, AXI_ID_WIDTH, AXI_SIZE_WIDTH))
+    val ddr_out = Flipped(new axidata(AXI_ADDR_WIDTH, AXI_DATA_WIDTH, AXI_ID_WIDTH + 1, AXI_SIZE_WIDTH))
 
     //control path
     val tiers_base_addr = Vec(2, Input(UInt(AXI_ADDR_WIDTH.W)))
@@ -716,73 +671,172 @@ class multi_port_mc(AXI_ADDR_WIDTH : Int = 64, AXI_DATA_WIDTH: Int = 64, AXI_ID_
     val start = Input(Bool())
     val root = Input(UInt(32.W))
     val signal = Input(Bool())
+    val end = Input(Bool())
   })
 
-  //val tier_fifo_0 = Module(new BRAM_fifo(16, 512, "tier_fifo_0"))
-  //val tier_fifo_1 = Module(new BRAM_fifo(16, 512, "tier_fifo_1"))
-  //val arbitrator_0 = Module(new axi_arbitrator())
+  val tier_fifo = Seq.tabulate(2)(i => Module(new BRAM_fifo(16, 512, "tier_fifo" + i.toString)))
+  val tier_counter = RegInit(VecInit(Seq.fill(2)(0.U(32.W))))
+  val collector = Module(new Collector(AXI_DATA_WIDTH))
 
+  object sm extends ChiselEnum {
+    val idole = Value(0x0.U)
+    val next_tier_is_0  = Value(0x1.U) // i "load"  -> 000_0011
+    val next_tier_is_1   = Value(0x2.U) // i "imm"   -> 001_0011
+    val flushing_0 = Value(0x3.U)
+    val flushing_1 = Value(0x4.U)
+    val writeback = Value(0x5.U)
+    val readback = Value(0x6.U)
+  }
+  val status = RegInit(sm.idole)
 
-  /*val counter = RegInit(0.U(32.W))
-  val addr = RegInit(0.U(AXI_ADDR_WIDTH.W))
-  when(io.step_start){
-    counter := io.tier_count
-  }.elsewhen(io.ddr_ar.arvalid.asBool() & io.ddr_ar.arready.asBool()){
-    counter := Mux(counter > (AXI_DATA_WIDTH / 4).U, counter - (AXI_DATA_WIDTH / 4).U, 0.U)
-  }
-  when(io.step_start){
-    addr := io.tier_base_addr
-  }.elsewhen(io.ddr_ar.arvalid.asBool() & io.ddr_ar.arready.asBool()){
-    addr := addr + AXI_DATA_WIDTH.U
-  }.elsewhen(counter === 0.U){
-    addr := 0.U
-  }
-  io.ddr_ar.araddr := addr
-  io.ddr_ar.arid := 0.U
-  io.ddr_ar.arlen := 0.U
-  io.ddr_ar.arburst := 1.U
-  io.ddr_ar.arsize := 6.U
-  io.ddr_ar.arlock := 0.U
-  io.ddr_ar.arlen := 0.U
-  io.ddr_ar.arvalid := counter > 0.U
-  val rcounter = RegInit(0.U(32.W))
-  when(io.step_start){
-    rcounter := io.tier_count
-  }.elsewhen(io.ddr_r.rvalid.asBool() & io.ddr_r.rready.asBool()){
-    rcounter := Mux(rcounter > (AXI_DATA_WIDTH / 4).U, rcounter - (AXI_DATA_WIDTH / 4).U, 0.U)
-  }
-  val keep = Wire(Vec(16, Bool()))
-  keep.zipWithIndex.map {
-    case(k, i) => k := rcounter > i.U
+  when(io.start && status === sm.idole){
+    status := sm.next_tier_is_1
+  }.elsewhen(io.signal && status === sm.next_tier_is_1){
+    status := sm.flushing_1
+  }.elsewhen(io.signal && status === sm.next_tier_is_0){
+    status := sm.flushing_0
+  }.elsewhen(collector.io.out.tvalid === false.B && status === sm.flushing_1){
+    status := sm.next_tier_is_0
+  }.elsewhen(collector.io.out.tvalid === false.B && status === sm.flushing_0){
+    status := sm.next_tier_is_1
+  }.elsewhen(io.end){
+    status := sm.idole
   }
 
-  //pe_in to ddr_out direction
-  def vid_to_mcid(vid: UInt): UInt = {
-    vid
-  }
-  val PEs_tvalid = Wire(Vec(MASTER_NUM, Vec(SLAVE_NUM, Bool())))
-  val PEs_tkeep = Wire(Vec(MASTER_NUM, Vec(SLAVE_NUM, Bool())))
-  val PEs_tdata = Wire(Vec(SLAVE_NUM, UInt(32.W)))
-  io.pe_in.zipWithIndex.map{
-    case(pe, i) => {
-      PEs_tkeep.zipWithIndex.map{
-        case (k, j) => k(i) := Mux(j.U === vid_to_mcid(pe.tdata), pe.tkeep.asBool(), false.B)
+  val next_tier_mask = Cat(status === sm.next_tier_is_1 | status === sm.flushing_1,
+      status === sm.next_tier_is_0 | status === sm.flushing_0)
+  val axi = Wire(Flipped(new axidata(AXI_ADDR_WIDTH, AXI_DATA_WIDTH, AXI_ID_WIDTH, AXI_SIZE_WIDTH)))
+  val tier_base_addr = RegInit(VecInit(Seq.fill(2)(0.U(AXI_ADDR_WIDTH.W))))
+  val tier_status = RegInit(VecInit(Seq.fill(2)(sm.idole)))
+  tier_base_addr.zipWithIndex.map{
+    case(a, i) => {
+      when(io.start && status === sm.idole){
+        a := io.tiers_base_addr(i)
+      }.elsewhen(next_tier_mask(i) && axi.aw.awready.asBool() && axi.aw.awvalid.asBool()){
+        a := a + 1024.U
+      }.elsewhen(!next_tier_mask(i) && axi.ar.arready.asBool() && axi.ar.arvalid.asBool()){
+        a := a + 1024.U
       }
-      PEs_tvalid.zipWithIndex.map{
-        case (v, j) => v(i) := Mux(j.U === vid_to_mcid(pe.tdata), pe.tvalid, false.B)
-      }
-      PEs_tdata(i) := pe.tdata
-      pe.tready := io.ddr_out(vid_to_mcid((pe.tdata))).tready
     }
   }
-  io.ddr_out.zipWithIndex.map{
-    case(ddr, i) => {
-      ddr.tkeep := PEs_tkeep(i).asUInt() & PEs_tvalid(i).asUInt()
-      ddr.tvalid := PEs_tvalid(i).reduce(_|_)
-      ddr.tlast := true.B
-      ddr.tdata := PEs_tdata.asUInt()
+  tier_counter.zipWithIndex.map{
+    case(c, i) => {
+      when(next_tier_mask(i) && collector.io.out.tvalid && collector.io.out.tready){
+        c := c + collector.io.out.tkeep.asTypeOf(Vec(16, Bool())).asTypeOf(Vec(16, UInt(4.W))).reduce(_+_)
+      }.elsewhen(!next_tier_mask(i) && io.cacheable_out.tready && io.cacheable_out.tvalid){
+        c := Mux(c > 16.U, c - 16.U, 0.U)
+      }
     }
-  }*/
+  }
+  tier_fifo.zipWithIndex.map{
+    case(f, i) => {
+      f.io.rd_en := Mux(next_tier_mask(i), axi.w.wready, io.cacheable_out.tready)
+      f.io.wr_en := Mux(next_tier_mask(i), collector.io.out.tvalid, axi.r.rvalid)
+      f.io.din := Mux(next_tier_mask(i), collector.io.out.tdata, axi.r.rdata)
+      f.io.clk := clock.asBool()
+      f.io.srst := reset.asBool()
+    }
+  }
+  tier_status.zipWithIndex.map{
+    case (s, i) => {
+      when(next_tier_mask(i) && tier_fifo(i).io.full && s === sm.idole){
+        s := sm.writeback
+      }.elsewhen(!next_tier_mask(i) && tier_fifo(i).io.empty && s === sm.idole){
+        s := sm.readback
+      }.elsewhen(s === sm.writeback && axi.w.wlast.asBool()){
+        s := sm.idole
+      }.elsewhen(s === sm.readback && axi.r.rlast.asBool()){
+        s := sm.idole
+      }
+    }
+  }
+
+  collector.io.in <> io.cacheable_in
+  collector.io.flush := status === sm.flushing_0 | status === sm.flushing_1
+  collector.io.out.tready := Mux(next_tier_mask(0), tier_fifo(0).io.full === false.B, tier_fifo(1).io.full === false.B)
+  io.unvisited_size := Mux(next_tier_mask(0), tier_counter(0), tier_counter(1))
+  io.cacheable_out.tvalid := Mux(next_tier_mask(0), tier_fifo(1).io.empty === false.B, tier_fifo(0).io.empty === false.B)
+  io.cacheable_out.tdata := Mux(next_tier_mask(0), tier_fifo(1).io.dout, tier_fifo(0).io.dout)
+  io.cacheable_out.tkeep := VecInit(Seq.fill(16)(true.B)).asUInt()
+  io.cacheable_out.tlast := true.B
+
+  val wcount = RegInit(0.U(8.W))
+  when(axi.aw.awvalid.asBool() && axi.aw.awready.asBool()){
+    wcount := 16.U
+  }.elsewhen(axi.w.wvalid.asBool() && axi.w.wready.asBool()){
+    wcount := wcount - 1.U
+  }
+  axi.aw.awaddr := Mux(next_tier_mask(0), tier_base_addr(0), tier_base_addr(1))
+  axi.aw.awid := 0.U
+  axi.aw.awlen := 15.U
+  axi.aw.awlock := 0.U
+  axi.aw.awburst := 1.U
+  axi.aw.awsize := 6.U
+  axi.aw.awvalid := Mux(next_tier_mask(0), tier_fifo(0).io.full, tier_fifo(1).io.full)
+  axi.ar.araddr := Mux(next_tier_mask(0), tier_base_addr(1), tier_base_addr(0))
+  axi.ar.arid := 0.U
+  axi.ar.arlen := 15.U
+  axi.ar.arburst := 1.U
+  axi.ar.arsize := 6.U
+  axi.ar.arlock := 0.U
+  axi.ar.arlen := 0.U
+  axi.ar.arvalid := Mux(next_tier_mask(0), tier_fifo(1).io.empty, tier_fifo(0).io.empty)
+  axi.w.wdata := Mux(next_tier_mask(0), tier_fifo(0).io.dout, tier_fifo(1).io.dout)
+  axi.w.wvalid := Mux(next_tier_mask(0), tier_status(0) === sm.writeback, tier_status(1) === sm.writeback)
+  axi.w.wlast := wcount === 1.U
+  axi.w.wstrb := VecInit(Seq.fill(64)(true.B)).asUInt()
+  axi.b.bready := true.B
+  axi.r.rready := true.B
+
+  val arbitrator = Module(new xbar(AXI_ADDR_WIDTH, AXI_DATA_WIDTH, AXI_ID_WIDTH, AXI_SIZE_WIDTH))
+  axi.r.rvalid := arbitrator.io.s_axi.r.rvalid(1)
+  axi.r.rdata := arbitrator.io.s_axi.r.rdata(2 * AXI_DATA_WIDTH * 8 - 1, AXI_DATA_WIDTH * 8)
+  axi.r.rid := arbitrator.io.s_axi.r.rid(2 * AXI_ID_WIDTH - 1, AXI_ID_WIDTH)
+  axi.r.rlast := arbitrator.io.s_axi.r.rlast(1)
+  axi.r.rresp := arbitrator.io.s_axi.r.rresp(3, 2)
+  io.non_cacheable_in.r.rvalid := arbitrator.io.s_axi.r.rvalid(0)
+  io.non_cacheable_in.r.rdata := arbitrator.io.s_axi.r.rdata(AXI_DATA_WIDTH * 8 - 1, 0)
+  io.non_cacheable_in.r.rid := arbitrator.io.s_axi.r.rid(AXI_ID_WIDTH - 1, 0)
+  io.non_cacheable_in.r.rlast := arbitrator.io.s_axi.r.rlast(0)
+  io.non_cacheable_in.r.rresp := arbitrator.io.s_axi.r.rresp(1, 0)
+  arbitrator.io.s_axi.r.rready := Cat(axi.r.rready, io.non_cacheable_in.r.rready)
+
+  arbitrator.io.s_axi.ar.araddr := Cat(axi.ar.araddr, io.non_cacheable_in.ar.araddr)
+  arbitrator.io.s_axi.ar.arid := Cat(axi.ar.arid, io.non_cacheable_in.ar.arid)
+  arbitrator.io.s_axi.ar.arvalid := Cat(axi.ar.arvalid, io.non_cacheable_in.ar.arvalid)
+  arbitrator.io.s_axi.ar.arsize := Cat(axi.ar.arsize, io.non_cacheable_in.ar.arsize)
+  arbitrator.io.s_axi.ar.arlen := Cat(axi.ar.arlen, io.non_cacheable_in.ar.arlen)
+  arbitrator.io.s_axi.ar.arlock := Cat(axi.ar.arlock, io.non_cacheable_in.ar.arlock)
+  arbitrator.io.s_axi.ar.arburst := Cat(axi.ar.arburst, io.non_cacheable_in.ar.arburst)
+  axi.ar.arready := arbitrator.io.s_axi.ar.arready(1)
+  io.non_cacheable_in.ar.arready := arbitrator.io.s_axi.ar.arready(0)
+
+  arbitrator.io.s_axi.w.wvalid := Cat(axi.w.wvalid, io.non_cacheable_in.w.wvalid)
+  arbitrator.io.s_axi.w.wlast := Cat(axi.w.wlast, io.non_cacheable_in.w.wlast)
+  arbitrator.io.s_axi.w.wdata := Cat(axi.w.wdata, io.non_cacheable_in.w.wdata)
+  arbitrator.io.s_axi.w.wstrb := Cat(axi.w.wstrb, io.non_cacheable_in.w.wstrb)
+  axi.w.wready := arbitrator.io.s_axi.w.wready(1)
+  io.non_cacheable_in.w.wready := arbitrator.io.s_axi.w.wready(0)
+
+  arbitrator.io.s_axi.aw.awvalid := Cat(axi.aw.awvalid, io.non_cacheable_in.aw.awvalid)
+  arbitrator.io.s_axi.aw.awid := Cat(axi.aw.awid, io.non_cacheable_in.aw.awid)
+  arbitrator.io.s_axi.aw.awsize := Cat(axi.aw.awsize, io.non_cacheable_in.aw.awsize)
+  arbitrator.io.s_axi.aw.awlen := Cat(axi.aw.awlen, io.non_cacheable_in.aw.awlen)
+  arbitrator.io.s_axi.aw.awburst := Cat(axi.aw.awburst, io.non_cacheable_in.aw.awburst)
+  arbitrator.io.s_axi.aw.awlock := Cat(axi.aw.awlock, io.non_cacheable_in.aw.awlock)
+  arbitrator.io.s_axi.aw.awaddr := Cat(axi.aw.awaddr, io.non_cacheable_in.aw.awaddr)
+  axi.aw.awready := arbitrator.io.s_axi.aw.awready(1)
+  io.non_cacheable_in.aw.awready := arbitrator.io.s_axi.aw.awready(0)
+
+  arbitrator.io.s_axi.b.bready := Cat(axi.b.bready, io.non_cacheable_in.b.bready)
+  axi.b.bvalid := arbitrator.io.s_axi.b.bvalid(1)
+  axi.b.bresp := arbitrator.io.s_axi.b.bresp(3, 2)
+  axi.b.bid := arbitrator.io.s_axi.b.bid(2 * AXI_ID_WIDTH - 1, AXI_ID_WIDTH)
+  io.non_cacheable_in.b.bvalid := arbitrator.io.s_axi.b.bvalid(0)
+  io.non_cacheable_in.b.bresp := arbitrator.io.s_axi.b.bresp(1, 0)
+  io.non_cacheable_in.b.bid := arbitrator.io.s_axi.b.bid(AXI_ID_WIDTH - 1, 0)
+
+  io.ddr_out <> arbitrator.io.m_axi
 }
 
 /*
@@ -903,41 +957,11 @@ class BFS(AXI_ADDR_WIDTH : Int = 64, AXI_DATA_WIDTH: Int = 64, AXI_ID_WIDTH: Int
   Gathers.io.ddr_in <> pl_mc.io.cacheable_out
   bxbar.io.ddr_in(0) <> Broadcasts.io.xbar_out
 
-  Broadcasts.io.ddr_r.rvalid := pl_mc.io.non_cacheable_in.rvalid
-  Broadcasts.io.ddr_r.rdata := pl_mc.io.non_cacheable_in.rdata
-  Broadcasts.io.ddr_r.rid := pl_mc.io.non_cacheable_in.rid
-  Broadcasts.io.ddr_r.rlast := pl_mc.io.non_cacheable_in.rlast
-  Broadcasts.io.ddr_r.rresp := pl_mc.io.non_cacheable_in.rresp
-  pl_mc.io.non_cacheable_in.rready := Broadcasts.io.ddr_r.rready
-
-  pl_mc.io.non_cacheable_in.araddr := Broadcasts.io.ddr_ar.araddr
-  pl_mc.io.non_cacheable_in.arid := Broadcasts.io.ddr_ar.arid
-  pl_mc.io.non_cacheable_in.arvalid := Broadcasts.io.ddr_ar.arvalid
-  pl_mc.io.non_cacheable_in.arsize := Broadcasts.io.ddr_ar.arsize
-  pl_mc.io.non_cacheable_in.arlen := Broadcasts.io.ddr_ar.arlen
-  pl_mc.io.non_cacheable_in.arlock := Broadcasts.io.ddr_ar.arlock
-  pl_mc.io.non_cacheable_in.arburst := Broadcasts.io.ddr_ar.arburst
-  Broadcasts.io.ddr_ar.arready := pl_mc.io.non_cacheable_in.arburst
-
-  pl_mc.io.non_cacheable_in.wvalid := Applys.io.ddr_w.wvalid
-  pl_mc.io.non_cacheable_in.wlast := Applys.io.ddr_w.wlast
-  pl_mc.io.non_cacheable_in.wdata := Applys.io.ddr_w.wdata
-  pl_mc.io.non_cacheable_in.wstrb := Applys.io.ddr_w.wstrb
-  Applys.io.ddr_w.wready := pl_mc.io.non_cacheable_in.wready
-
-  pl_mc.io.non_cacheable_in.awvalid := Applys.io.ddr_aw.awvalid
-  pl_mc.io.non_cacheable_in.awid := Applys.io.ddr_aw.awid
-  pl_mc.io.non_cacheable_in.awsize := Applys.io.ddr_aw.awsize
-  pl_mc.io.non_cacheable_in.awlen := Applys.io.ddr_aw.awlen
-  pl_mc.io.non_cacheable_in.awburst := Applys.io.ddr_aw.awburst
-  pl_mc.io.non_cacheable_in.awlock := Applys.io.ddr_aw.awlock
-  pl_mc.io.non_cacheable_in.awaddr := Applys.io.ddr_aw.awaddr
-  Applys.io.ddr_aw.awready := pl_mc.io.non_cacheable_in.awready
-
-  pl_mc.io.non_cacheable_in.bready := Applys.io.ddr_b.bready
-  Applys.io.ddr_b.bvalid := pl_mc.io.non_cacheable_in.bvalid
-  Applys.io.ddr_b.bresp := pl_mc.io.non_cacheable_in.bresp
-  Applys.io.ddr_b.bid := pl_mc.io.non_cacheable_in.bid
+  Broadcasts.io.ddr_r <> pl_mc.io.non_cacheable_in.r
+  Broadcasts.io.ddr_ar <> pl_mc.io.non_cacheable_in.ar
+  Applys.io.ddr_w <> pl_mc.io.non_cacheable_in.w
+  Applys.io.ddr_aw <> pl_mc.io.non_cacheable_in.aw
+  Applys.io.ddr_b <> pl_mc.io.non_cacheable_in.b
 
   Scatters.zipWithIndex.map{
     case (pe, i) => {
@@ -958,4 +982,10 @@ class BFS(AXI_ADDR_WIDTH : Int = 64, AXI_DATA_WIDTH: Int = 64, AXI_ID_WIDTH: Int
   Broadcasts.io.edge_base_addr := Cat(controls.io.data(4), controls.io.data(3))
   Applys.io.level_base_addr := Cat(controls.io.data(6), controls.io.data(5))
   Applys.io.level := controls.io.level
+  pl_mc.io.tiers_base_addr(0) := Cat(controls.io.data(9), controls.io.data(8))
+  pl_mc.io.tiers_base_addr(1) := Cat(controls.io.data(11), controls.io.data(10))
+  pl_mc.io.root := controls.io.data(7)
+  pl_mc.io.signal := controls.io.signal
+  pl_mc.io.start := controls.io.data(0)(0)
+  pl_mc.io.end := controls.io.data(0)(1)
 }

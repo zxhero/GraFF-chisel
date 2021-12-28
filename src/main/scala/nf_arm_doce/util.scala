@@ -1,6 +1,7 @@
 package utils
 import chisel3._
 import chisel3.util._
+import nf_arm_doce.axidata
 
 class fifo(val size : Int, val width : Int) extends Module {
   val io = IO(new Bundle {
@@ -98,4 +99,13 @@ class BRAM_fifo(val size : Int, val width : Int, val mname : String) extends Bla
   })
 
   override def desiredName = mname
+}
+
+class xbar(AXI_ADDR_WIDTH : Int = 64, AXI_DATA_WIDTH: Int = 8, AXI_ID_WIDTH: Int = 1, AXI_SIZE_WIDTH: Int = 3) extends BlackBox {
+  val io = IO(new Bundle {
+    val s_axi = new axidata(AXI_ADDR_WIDTH, AXI_DATA_WIDTH, AXI_ID_WIDTH, AXI_SIZE_WIDTH, 2)
+    val m_axi = Flipped(new axidata(AXI_ADDR_WIDTH, AXI_DATA_WIDTH, AXI_ID_WIDTH, AXI_SIZE_WIDTH))
+    val aclk = Input(Bool())
+    val aresetn = Input(Bool())
+  })
 }

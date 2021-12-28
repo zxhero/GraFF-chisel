@@ -17,16 +17,7 @@ class streamdata(AXIS_DATA_WIDTH: Int = 8, ELEMENT_WIDTH: Int = 1) extends Bundl
   }
 }
 
-class axidata(AXI_ADDR_WIDTH : Int = 44, AXI_DATA_WIDTH: Int = 16, AXI_ID_WIDTH: Int = 18, AXI_SIZE_WIDTH: Int = 3, NUM : Int = 1) extends Bundle {
-  val awaddr = Input(UInt((NUM * AXI_ADDR_WIDTH).W))
-  val awid = Input(UInt((NUM * AXI_ID_WIDTH).W))
-  val awlen = Input(UInt((NUM * 8).W))
-  val awsize = Input(UInt((NUM * AXI_SIZE_WIDTH).W))
-  val awburst = Input(UInt((NUM * 2).W))
-  val awlock = Input(UInt((NUM * 1).W))
-  val awvalid = Input(UInt((NUM * 1).W))
-  val awready = Output(UInt((NUM * 1).W))
-
+class axiar(AXI_ADDR_WIDTH : Int = 44, AXI_ID_WIDTH: Int = 18, AXI_SIZE_WIDTH: Int = 3, NUM : Int = 1) extends Bundle {
   val araddr = Input(UInt((NUM * AXI_ADDR_WIDTH).W))
   val arid = Input(UInt((NUM * AXI_ID_WIDTH).W))
   val arlen = Input(UInt((NUM * 8).W))
@@ -35,24 +26,49 @@ class axidata(AXI_ADDR_WIDTH : Int = 44, AXI_DATA_WIDTH: Int = 16, AXI_ID_WIDTH:
   val arlock = Input(UInt((NUM * 1).W))
   val arvalid = Input(UInt((NUM * 1).W))
   val arready = Output(UInt((NUM * 1).W))
+}
 
+class axiaw(AXI_ADDR_WIDTH : Int = 44, AXI_ID_WIDTH: Int = 18, AXI_SIZE_WIDTH: Int = 3, NUM : Int = 1) extends Bundle {
+  val awaddr = Input(UInt((NUM * AXI_ADDR_WIDTH).W))
+  val awid = Input(UInt((NUM * AXI_ID_WIDTH).W))
+  val awlen = Input(UInt((NUM * 8).W))
+  val awsize = Input(UInt((NUM * AXI_SIZE_WIDTH).W))
+  val awburst = Input(UInt((NUM * 2).W))
+  val awlock = Input(UInt((NUM * 1).W))
+  val awvalid = Input(UInt((NUM * 1).W))
+  val awready = Output(UInt((NUM * 1).W))
+}
+
+class axiw(AXI_DATA_WIDTH: Int = 16, NUM : Int = 1) extends Bundle {
   val wdata = Input(UInt((NUM*8*AXI_DATA_WIDTH).W))
   val wstrb = Input(UInt((NUM*AXI_DATA_WIDTH).W))
   val wlast = Input(UInt((NUM * 1).W))
   val wvalid = Input(UInt((NUM * 1).W))
   val wready = Output(UInt((NUM * 1).W))
+}
 
+class axib(AXI_ID_WIDTH: Int = 18, NUM : Int = 1) extends Bundle {
+  val bresp = Output(UInt((NUM * 2).W))
+  val bid = Output(UInt((NUM * AXI_ID_WIDTH).W))
+  val bvalid = Output(UInt((NUM * 1).W))
+  val bready = Input(UInt((NUM * 1).W))
+}
+
+class axir(AXI_DATA_WIDTH: Int = 16, AXI_ID_WIDTH: Int = 18, NUM : Int = 1) extends Bundle{
   val rdata = Output(UInt((NUM*8*AXI_DATA_WIDTH).W))
   val rid = Output(UInt((NUM * AXI_ID_WIDTH).W))
   val rlast = Output(UInt((NUM * 1).W))
   val rresp = Output(UInt((NUM * 2).W))
   val rvalid = Output(UInt((NUM * 1).W))
   val rready = Input(UInt((NUM * 1).W))
+}
 
-  val bresp = Output(UInt((NUM * 2).W))
-  val bid = Output(UInt((NUM * AXI_ID_WIDTH).W))
-  val bvalid = Output(UInt((NUM * 1).W))
-  val bready = Input(UInt((NUM * 1).W))
+class axidata(AXI_ADDR_WIDTH : Int = 44, AXI_DATA_WIDTH: Int = 16, AXI_ID_WIDTH: Int = 18, AXI_SIZE_WIDTH: Int = 3, NUM : Int = 1) extends Bundle {
+  val aw = new axiaw(AXI_ADDR_WIDTH, AXI_ID_WIDTH, AXI_SIZE_WIDTH, NUM)
+  val ar = new axiar(AXI_ADDR_WIDTH, AXI_ID_WIDTH, AXI_SIZE_WIDTH, NUM)
+  val w = new axiw(AXI_DATA_WIDTH, NUM)
+  val r = new axir(AXI_DATA_WIDTH, AXI_ID_WIDTH, NUM)
+  val b = new axib(AXI_ID_WIDTH, NUM)
 }
 
 class axilitedata(AXI_ADDR_WIDTH : Int = 44) extends Bundle {
