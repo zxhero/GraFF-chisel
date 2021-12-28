@@ -7,42 +7,6 @@ import chisel3.util._
 import utils._
 import numa.LookupTable
 
-class axi_arbitrator(AXI_ADDR_WIDTH : Int = 64, AXI_DATA_WIDTH: Int = 64, AXI_ID_WIDTH: Int = 4, AXI_SIZE_WIDTH: Int = 3, NUM : Int = 2) extends  Module {
-  val io = IO(new Bundle() {
-    val xbar_in = (new axiar(AXI_ADDR_WIDTH, AXI_ID_WIDTH, AXI_SIZE_WIDTH, NUM))
-    val ddr_out = Flipped(new axiar(AXI_ADDR_WIDTH, AXI_ID_WIDTH, AXI_SIZE_WIDTH, 1))
-  })
-
-  io.ddr_out.arburst := 1.U(2.W)
-  io.ddr_out.arlock := 0.U
-  io.ddr_out.arsize := log2Ceil(AXI_DATA_WIDTH).U(AXI_SIZE_WIDTH.W)
-
-  val addr = RegInit(0.U((AXI_ADDR_WIDTH * NUM).W))
-  val id = RegInit(0.U((NUM * AXI_ID_WIDTH).W))
-  val valid = RegInit(0.U((NUM).W))
-  val len = RegInit(0.U((NUM * 8).W))
-  when(io.xbar_in.arvalid =/= 0.U && io.xbar_in.arready =/= 0.U){
-    addr := io.xbar_in.araddr
-    id := io.xbar_in.arid
-    len := io.xbar_in.arlen
-  }
-  io.xbar_in.arready := VecInit(Seq.fill(NUM)(~(valid.orR()))).asUInt()
-
-  val select = MuxCase(0.U,
-    Array.tabulate(NUM)(x => (valid(x) -> (1.U(NUM.W) << x).asUInt()))
-  )
-  io.ddr_out.arvalid := select.orR()
-  io.ddr_out.arlen := Mux1H(Seq.tabulate(NUM)(x => (select(x) -> len(x * 8 + 7, x * 8))))
-  io.ddr_out.arid := Mux1H(Seq.tabulate(NUM)(x => (select(x) -> id(x * AXI_ID_WIDTH + AXI_ID_WIDTH - 1, x * AXI_ID_WIDTH))))
-  io.ddr_out.araddr := Mux1H(Seq.tabulate(NUM)(x => (select(x) -> addr(x * AXI_ADDR_WIDTH + AXI_ADDR_WIDTH - 1, x * AXI_ADDR_WIDTH))))
-
-  when(io.xbar_in.arvalid =/= 0.U && io.xbar_in.arready =/= 0.U){
-    valid := io.xbar_in.arvalid
-  }.elsewhen(io.ddr_out.arvalid.asBool() && io.ddr_out.arready.asBool()) {
-    valid := valid ^ select
-  }
-}
-
 class URAM(size : Int = 1024, width : Int = 32) extends BlackBox{
   val io = IO(new Bundle() {
     val addra = Input(UInt(log2Ceil(size).W))
@@ -79,9 +43,9 @@ class BRAM(size : Int = 1024 * 1024, width : Int = 1) extends BlackBox{
 
 class WB_engine(AXI_ADDR_WIDTH : Int = 64, AXI_DATA_WIDTH: Int = 64, AXI_ID_WIDTH: Int = 6, AXI_SIZE_WIDTH: Int = 3) extends Module{
   val io = IO(new Bundle() {
-    val ddr_aw = Flipped(new axiaw(AXI_ADDR_WIDTH, AXI_ID_WIDTH, AXI_SIZE_WIDTH, 1))
-    val ddr_w = Flipped(new axiw(AXI_DATA_WIDTH, 1))
-    val ddr_b = Flipped(new axib(AXI_ID_WIDTH, 1))
+    val ddr_aw = Decoupled(new axiaw(AXI_ADDR_WIDTH, AXI_ID_WIDTH, AXI_SIZE_WIDTH, 1))
+    val ddr_w = Decoupled(new axiw(AXI_DATA_WIDTH, 1))
+    val ddr_b = Flipped(Decoupled(new axib(AXI_ID_WIDTH, 1)))
 
     val xbar_in = (new streamdata(4))
     val level_base_addr = Input(UInt(64.W))
@@ -215,31 +179,31 @@ class WB_engine(AXI_ADDR_WIDTH : Int = 64, AXI_DATA_WIDTH: Int = 64, AXI_ID_WIDT
   aw_buffer.io.writeFlag := wb_sm === sm.wb_level1 || wb_sm === sm.wb_level2
   aw_buffer.io.dataIn := Mux(wb_sm === sm.wb_level1, io.level_base_addr + Cat(wb_block_addr(18, 7), wb_addr_pair(13,0)).asUInt(),
     io.level_base_addr + Cat(wb_block_addr(18, 7), wb_addr_pair(16 + 14 - 1,16)))
-  io.ddr_aw.awaddr := aw_buffer.io.dataOut
-  io.ddr_aw.awlock := 0.U
-  io.ddr_aw.awid := aw_buffer.io.rptr
-  io.ddr_aw.awlen := 0.U
-  io.ddr_aw.awburst := 1.U(2.W)
-  io.ddr_aw.awsize := 2.U
-  io.ddr_aw.awvalid := aw_buffer.io.empty === false.B
-  aw_buffer.io.readFlag := io.ddr_aw.awready
+  io.ddr_aw.bits.awaddr := aw_buffer.io.dataOut
+  io.ddr_aw.bits.awlock := 0.U
+  io.ddr_aw.bits.awid := aw_buffer.io.rptr
+  io.ddr_aw.bits.awlen := 0.U
+  io.ddr_aw.bits.awburst := 1.U(2.W)
+  io.ddr_aw.bits.awsize := 2.U
+  io.ddr_aw.valid := aw_buffer.io.empty === false.B
+  aw_buffer.io.readFlag := io.ddr_aw.ready
 
   w_buffer.io.writeFlag := wb_sm === sm.wb_level1 || wb_sm === sm.wb_level2
   w_buffer.io.dataIn := wb_level
-  io.ddr_w.wdata := w_buffer.io.dataOut
-  io.ddr_w.wlast := true.B
-  io.ddr_w.wvalid := w_buffer.io.empty === false.B
-  io.ddr_w.wstrb := 0xf.U
-  w_buffer.io.readFlag := io.ddr_w.wready
+  io.ddr_w.bits.wdata := w_buffer.io.dataOut
+  io.ddr_w.bits.wlast := true.B
+  io.ddr_w.valid := w_buffer.io.empty === false.B
+  io.ddr_w.bits.wstrb := 0xf.U
+  w_buffer.io.readFlag := io.ddr_w.ready
 
-  io.ddr_b.bready := true.B
+  io.ddr_b.ready := true.B
 }
 
 class Apply(AXI_ADDR_WIDTH : Int = 64, AXI_DATA_WIDTH: Int = 64, AXI_ID_WIDTH: Int = 6, AXI_SIZE_WIDTH: Int = 3) extends Module{
   val io = IO(new Bundle(){
-    val ddr_aw = Flipped(new axiaw(AXI_ADDR_WIDTH, AXI_ID_WIDTH, AXI_SIZE_WIDTH, 1))
-    val ddr_w = Flipped(new axiw(AXI_DATA_WIDTH, 1))
-    val ddr_b = Flipped(new axib(AXI_ID_WIDTH, 1))
+    val ddr_aw = Decoupled(new axiaw(AXI_ADDR_WIDTH, AXI_ID_WIDTH, AXI_SIZE_WIDTH, 1))
+    val ddr_w = Decoupled(new axiw(AXI_DATA_WIDTH, 1))
+    val ddr_b = Flipped(Decoupled(new axib(AXI_ID_WIDTH, 1)))
     val gather_in = (new streamdata(4))
 
     //control path
@@ -333,8 +297,8 @@ class Gather(AXI_DATA_WIDTH: Int = 64) extends Module{
 
 class Broadcast(AXI_ADDR_WIDTH : Int = 64, AXI_DATA_WIDTH: Int = 64, AXI_ID_WIDTH: Int = 6, AXI_SIZE_WIDTH: Int = 3, EMBEDDING : Int = 14) extends Module{
   val io = IO(new Bundle() {
-    val ddr_ar = Flipped(new axiar(AXI_ADDR_WIDTH, AXI_ID_WIDTH, AXI_SIZE_WIDTH))
-    val ddr_r = Flipped(new axir(AXI_DATA_WIDTH, AXI_ID_WIDTH))
+    val ddr_ar = Decoupled(new axiar(AXI_ADDR_WIDTH, AXI_ID_WIDTH, AXI_SIZE_WIDTH))
+    val ddr_r = Flipped(Decoupled(new axir(AXI_DATA_WIDTH, AXI_ID_WIDTH)))
     val gather_in = (new streamdata(4, 4))
     val xbar_out = Flipped(new streamdata(64, 4))
 
@@ -367,37 +331,40 @@ class Broadcast(AXI_ADDR_WIDTH : Int = 64, AXI_DATA_WIDTH: Int = 64, AXI_ID_WIDT
 
   //read edge array
   val edge_read_buffer = Module(new fifo(32, 64))
-  edge_read_buffer.io.dataIn := io.ddr_r.rdata(8 * 8 - 1, 0)
-  edge_read_buffer.io.writeFlag := !io.ddr_r.rid(AXI_ID_WIDTH - 1) & io.ddr_r.rvalid & (io.ddr_r.rdata(31, 0) > EMBEDDING.asUInt())
+  edge_read_buffer.io.dataIn := io.ddr_r.bits.rdata(8 * 8 - 1, 0)
+  edge_read_buffer.io.writeFlag := !io.ddr_r.bits.rid(AXI_ID_WIDTH - 1) & io.ddr_r.valid & (io.ddr_r.bits.rdata(31, 0) > EMBEDDING.asUInt())
 
-  val ar_arbitator = Module(new axi_arbitrator(AXI_ADDR_WIDTH, AXI_ID_WIDTH, AXI_SIZE_WIDTH, 2))
-  io.ddr_ar <> ar_arbitator.io.ddr_out
+  val arbi = Module(new Arbiter(new axiar(AXI_ADDR_WIDTH, AXI_ID_WIDTH, AXI_SIZE_WIDTH, 1), 2))
+  io.ddr_ar <> arbi.io.out
 
-  ar_arbitator.io.xbar_in.araddr:= Cat(io.edge_base_addr + edge_read_buffer.io.dataOut(63,32) << 2 ,
-    io.embedding_base_addr + vertex_read_buffer.io.dataOut << log2Ceil(4 * EMBEDDING + 8))
-  ar_arbitator.io.xbar_in.arvalid := Cat(edge_read_buffer.io.empty === false.B,
-    vertex_read_buffer.io.empty === false.B && vertex_read_buffer.io.dataOut(31) === 0.U)
+  arbi.io.in(0).bits.araddr := io.edge_base_addr + edge_read_buffer.io.dataOut(63,32) << 2
+  arbi.io.in(1).bits.araddr :=  io.embedding_base_addr + vertex_read_buffer.io.dataOut << log2Ceil(4 * EMBEDDING + 8)
+  arbi.io.in(0).valid := edge_read_buffer.io.empty === false.B
+  arbi.io.in(1).valid :=  vertex_read_buffer.io.empty === false.B && vertex_read_buffer.io.dataOut(31) === 0.U
   val remainning_edges = (edge_read_buffer.io.dataOut(31, 0) - EMBEDDING.asUInt())
   //we assume number of edges of a vertex is less than 4096 + 14 for now. TODO
   val arlen = Mux(((remainning_edges >> log2Ceil(AXI_DATA_WIDTH/4)) << log2Ceil(AXI_DATA_WIDTH/4)).asUInt() < remainning_edges,
     (remainning_edges >> log2Ceil(AXI_DATA_WIDTH/4)).asUInt() + 1.U,
     (remainning_edges >> log2Ceil(AXI_DATA_WIDTH/4)))
-  ar_arbitator.io.xbar_in.arlen := Cat(arlen.asUInt() - 1.U, ((4 * EMBEDDING + 8) / AXI_DATA_WIDTH - 1).asUInt())
-  ar_arbitator.io.xbar_in.arburst := Cat(1.U(2.W), 1.U(2.W))
-  ar_arbitator.io.xbar_in.arlock := 0.U
-  ar_arbitator.io.xbar_in.arsize := Cat(log2Ceil(AXI_DATA_WIDTH).U(AXI_SIZE_WIDTH.W),
-    log2Ceil(AXI_DATA_WIDTH).U(AXI_SIZE_WIDTH.W))
-  ar_arbitator.io.xbar_in.arid := Cat((1.U(AXI_ID_WIDTH) << (AXI_ID_WIDTH - 1)).asUInt() + edge_read_buffer.io.rptr,
-    vertex_read_buffer.io.rptr)
-  vertex_read_buffer.io.readFlag := ar_arbitator.io.xbar_in.arready(0)
-  edge_read_buffer.io.readFlag := ar_arbitator.io.xbar_in.arready(1)
+  arbi.io.in(0).bits.arlen := arlen.asUInt() - 1.U
+  arbi.io.in(1).bits.arlen := ((4 * EMBEDDING + 8) / AXI_DATA_WIDTH - 1).asUInt()
+  arbi.io.in(0).bits.arburst := 1.U(2.W)
+  arbi.io.in(1).bits.arburst := 1.U(2.W)
+  arbi.io.in(0).bits.arlock := 0.U
+  arbi.io.in(1).bits.arlock := 0.U
+  arbi.io.in(0).bits.arsize := log2Ceil(AXI_DATA_WIDTH).U(AXI_SIZE_WIDTH.W)
+  arbi.io.in(1).bits.arsize :=  log2Ceil(AXI_DATA_WIDTH).U(AXI_SIZE_WIDTH.W)
+  arbi.io.in(0).bits.arid := (1.U(AXI_ID_WIDTH) << (AXI_ID_WIDTH - 1)).asUInt() + edge_read_buffer.io.rptr
+  arbi.io.in(1).bits.arid :=  vertex_read_buffer.io.rptr
+  vertex_read_buffer.io.readFlag := arbi.io.in(1).ready
+  edge_read_buffer.io.readFlag := arbi.io.in(0).ready
 
   //front end of down ward
   val num_regfile = Module(new regFile(32, 32))
-  num_regfile.io.writeFlag := ar_arbitator.io.xbar_in.arready(1) & ar_arbitator.io.xbar_in.arvalid(1)
+  num_regfile.io.writeFlag := arbi.io.in(0).ready & arbi.io.in(0).valid
   num_regfile.io.wptr := edge_read_buffer.io.rptr
   num_regfile.io.dataIn := remainning_edges
-  num_regfile.io.rptr := io.ddr_r.rid(AXI_ID_WIDTH-2, 0)
+  num_regfile.io.rptr := io.ddr_r.bits.rid(AXI_ID_WIDTH-2, 0)
 
   //back end of down ward
   object sm extends ChiselEnum {
@@ -407,16 +374,16 @@ class Broadcast(AXI_ADDR_WIDTH : Int = 64, AXI_DATA_WIDTH: Int = 64, AXI_ID_WIDT
   }
   val status = RegInit(sm.firstBurst)
   val num = RegInit(0.U(32.W))
-  when(status === sm.firstBurst && io.ddr_r.rvalid.asBool() && io.ddr_r.rready.asBool()){
-    when(io.ddr_r.rlast.asBool()){
+  when(status === sm.firstBurst && io.ddr_r.valid.asBool() && io.ddr_r.ready.asBool()){
+    when(io.ddr_r.bits.rlast.asBool()){
       status := sm.firstBurst
       num := 0.U
     }.otherwise{
       num := num_regfile.io.dataOut
       status := sm.remainingBurst
     }
-  }.elsewhen(status === sm.remainingBurst && io.ddr_r.rvalid.asBool() && io.ddr_r.rready.asBool()){
-    when(io.ddr_r.rlast.asBool()){
+  }.elsewhen(status === sm.remainingBurst && io.ddr_r.valid.asBool() && io.ddr_r.ready.asBool()){
+    when(io.ddr_r.bits.rlast.asBool()){
       status := sm.firstBurst
       num := 0.U
     }.otherwise{
@@ -429,7 +396,7 @@ class Broadcast(AXI_ADDR_WIDTH : Int = 64, AXI_DATA_WIDTH: Int = 64, AXI_ID_WIDT
   }
   val keep = Wire(Vec(16, Bool()))
   keep.zipWithIndex.map {
-    case(k, i) => k := Mux(io.ddr_r.rid(AXI_ID_WIDTH-1), Mux(status === sm.firstBurst, num_regfile.io.dataOut > i.U, num > i.U),
+    case(k, i) => k := Mux(io.ddr_r.bits.rid(AXI_ID_WIDTH-1), Mux(status === sm.firstBurst, num_regfile.io.dataOut > i.U, num > i.U),
       Mux(i.U < 2.U, false.B, true.B))
   }
 
@@ -439,9 +406,9 @@ class Broadcast(AXI_ADDR_WIDTH : Int = 64, AXI_DATA_WIDTH: Int = 64, AXI_ID_WIDT
   io.xbar_out.tdata := vertex_out_fifo.io.dataOut(512 + 16 - 1, 16)
   io.xbar_out.tlast := true.B
   vertex_out_fifo.io.readFlag := io.xbar_out.tready
-  vertex_out_fifo.io.writeFlag := io.ddr_r.rvalid | upward_status === upward_sm.output_fin
-  vertex_out_fifo.io.dataIn := Mux(upward_status === upward_sm.output_fin, Cat("x80000000".asUInt(512.W), 0x1.U(16.W)), Cat(io.ddr_r.rdata, keep.asUInt()))
-  io.ddr_r.rready := vertex_out_fifo.io.full === false.B & edge_read_buffer.io.full === false.B
+  vertex_out_fifo.io.writeFlag := io.ddr_r.valid | upward_status === upward_sm.output_fin
+  vertex_out_fifo.io.dataIn := Mux(upward_status === upward_sm.output_fin, Cat("x80000000".asUInt(512.W), 0x1.U(16.W)), Cat(io.ddr_r.bits.rdata, keep.asUInt()))
+  io.ddr_r.ready := vertex_out_fifo.io.full === false.B & edge_read_buffer.io.full === false.B
 
   //control path
   when(io.signal && (upward_status === upward_sm.idole)){
@@ -456,16 +423,16 @@ class Broadcast(AXI_ADDR_WIDTH : Int = 64, AXI_DATA_WIDTH: Int = 64, AXI_ID_WIDT
 
   when(io.signal){
     traveled_edges_reg := 0.U
-  }.elsewhen(!io.ddr_r.rid(AXI_ID_WIDTH - 1) & io.ddr_r.rvalid.asBool() & io.ddr_r.rready.asBool()){
-    traveled_edges_reg := traveled_edges_reg + io.ddr_r.rdata(31, 0)
+  }.elsewhen(!io.ddr_r.bits.rid(AXI_ID_WIDTH - 1) & io.ddr_r.valid.asBool() & io.ddr_r.ready.asBool()){
+    traveled_edges_reg := traveled_edges_reg + io.ddr_r.bits.rdata(31, 0)
   }
 
   when(vertex_read_buffer.io.empty === false.B && vertex_read_buffer.io.dataOut(31) === 0.U
-    && io.ddr_r.rvalid.asBool() && io.ddr_r.rready.asBool() && io.ddr_r.rlast.asBool() && !edge_read_buffer.io.writeFlag){
+    && io.ddr_r.valid.asBool() && io.ddr_r.ready.asBool() && io.ddr_r.bits.rlast.asBool() && !edge_read_buffer.io.writeFlag){
     inflight_vtxs := inflight_vtxs
   }.elsewhen(vertex_read_buffer.io.empty === false.B && vertex_read_buffer.io.dataOut(31) === 0.U){
     inflight_vtxs := inflight_vtxs + 1.U
-  }.elsewhen(io.ddr_r.rvalid.asBool() && io.ddr_r.rready.asBool() && io.ddr_r.rlast.asBool() && !edge_read_buffer.io.writeFlag){
+  }.elsewhen(io.ddr_r.valid.asBool() && io.ddr_r.ready.asBool() && io.ddr_r.bits.rlast.asBool() && !edge_read_buffer.io.writeFlag){
     inflight_vtxs := inflight_vtxs - 1.U
   }
 }
@@ -712,9 +679,9 @@ class multi_port_mc(AXI_ADDR_WIDTH : Int = 64, AXI_DATA_WIDTH: Int = 64, AXI_ID_
     case(a, i) => {
       when(io.start && status === sm.idole){
         a := io.tiers_base_addr(i)
-      }.elsewhen(next_tier_mask(i) && axi.aw.awready.asBool() && axi.aw.awvalid.asBool()){
+      }.elsewhen(next_tier_mask(i) && axi.aw.ready.asBool() && axi.aw.valid.asBool()){
         a := a + 1024.U
-      }.elsewhen(!next_tier_mask(i) && axi.ar.arready.asBool() && axi.ar.arvalid.asBool()){
+      }.elsewhen(!next_tier_mask(i) && axi.ar.ready.asBool() && axi.ar.valid.asBool()){
         a := a + 1024.U
       }
     }
@@ -730,9 +697,9 @@ class multi_port_mc(AXI_ADDR_WIDTH : Int = 64, AXI_DATA_WIDTH: Int = 64, AXI_ID_
   }
   tier_fifo.zipWithIndex.map{
     case(f, i) => {
-      f.io.rd_en := Mux(next_tier_mask(i), axi.w.wready, io.cacheable_out.tready)
-      f.io.wr_en := Mux(next_tier_mask(i), collector.io.out.tvalid, axi.r.rvalid)
-      f.io.din := Mux(next_tier_mask(i), collector.io.out.tdata, axi.r.rdata)
+      f.io.rd_en := Mux(next_tier_mask(i), axi.w.ready, io.cacheable_out.tready)
+      f.io.wr_en := Mux(next_tier_mask(i), collector.io.out.tvalid, axi.r.valid)
+      f.io.din := Mux(next_tier_mask(i), collector.io.out.tdata, axi.r.bits.rdata)
       f.io.clk := clock.asBool()
       f.io.srst := reset.asBool()
     }
@@ -743,9 +710,9 @@ class multi_port_mc(AXI_ADDR_WIDTH : Int = 64, AXI_DATA_WIDTH: Int = 64, AXI_ID_
         s := sm.writeback
       }.elsewhen(!next_tier_mask(i) && tier_fifo(i).io.empty && s === sm.idole){
         s := sm.readback
-      }.elsewhen(s === sm.writeback && axi.w.wlast.asBool()){
+      }.elsewhen(s === sm.writeback && axi.w.bits.wlast.asBool()){
         s := sm.idole
-      }.elsewhen(s === sm.readback && axi.r.rlast.asBool()){
+      }.elsewhen(s === sm.readback && axi.r.bits.rlast.asBool()){
         s := sm.idole
       }
     }
@@ -761,82 +728,82 @@ class multi_port_mc(AXI_ADDR_WIDTH : Int = 64, AXI_DATA_WIDTH: Int = 64, AXI_ID_
   io.cacheable_out.tlast := true.B
 
   val wcount = RegInit(0.U(8.W))
-  when(axi.aw.awvalid.asBool() && axi.aw.awready.asBool()){
+  when(axi.aw.valid.asBool() && axi.aw.ready.asBool()){
     wcount := 16.U
-  }.elsewhen(axi.w.wvalid.asBool() && axi.w.wready.asBool()){
+  }.elsewhen(axi.w.valid.asBool() && axi.w.ready.asBool()){
     wcount := wcount - 1.U
   }
-  axi.aw.awaddr := Mux(next_tier_mask(0), tier_base_addr(0), tier_base_addr(1))
-  axi.aw.awid := 0.U
-  axi.aw.awlen := 15.U
-  axi.aw.awlock := 0.U
-  axi.aw.awburst := 1.U
-  axi.aw.awsize := 6.U
-  axi.aw.awvalid := Mux(next_tier_mask(0), tier_fifo(0).io.full, tier_fifo(1).io.full)
-  axi.ar.araddr := Mux(next_tier_mask(0), tier_base_addr(1), tier_base_addr(0))
-  axi.ar.arid := 0.U
-  axi.ar.arlen := 15.U
-  axi.ar.arburst := 1.U
-  axi.ar.arsize := 6.U
-  axi.ar.arlock := 0.U
-  axi.ar.arlen := 0.U
-  axi.ar.arvalid := Mux(next_tier_mask(0), tier_fifo(1).io.empty, tier_fifo(0).io.empty)
-  axi.w.wdata := Mux(next_tier_mask(0), tier_fifo(0).io.dout, tier_fifo(1).io.dout)
-  axi.w.wvalid := Mux(next_tier_mask(0), tier_status(0) === sm.writeback, tier_status(1) === sm.writeback)
-  axi.w.wlast := wcount === 1.U
-  axi.w.wstrb := VecInit(Seq.fill(64)(true.B)).asUInt()
-  axi.b.bready := true.B
-  axi.r.rready := true.B
+  axi.aw.bits.awaddr := Mux(next_tier_mask(0), tier_base_addr(0), tier_base_addr(1))
+  axi.aw.bits.awid := 0.U
+  axi.aw.bits.awlen := 15.U
+  axi.aw.bits.awlock := 0.U
+  axi.aw.bits.awburst := 1.U
+  axi.aw.bits.awsize := 6.U
+  axi.aw.valid := Mux(next_tier_mask(0), tier_fifo(0).io.full, tier_fifo(1).io.full)
+  axi.ar.bits.araddr := Mux(next_tier_mask(0), tier_base_addr(1), tier_base_addr(0))
+  axi.ar.bits.arid := 0.U
+  axi.ar.bits.arlen := 15.U
+  axi.ar.bits.arburst := 1.U
+  axi.ar.bits.arsize := 6.U
+  axi.ar.bits.arlock := 0.U
+  axi.ar.bits.arlen := 0.U
+  axi.ar.valid := Mux(next_tier_mask(0), tier_fifo(1).io.empty, tier_fifo(0).io.empty)
+  axi.w.bits.wdata := Mux(next_tier_mask(0), tier_fifo(0).io.dout, tier_fifo(1).io.dout)
+  axi.w.valid := Mux(next_tier_mask(0), tier_status(0) === sm.writeback, tier_status(1) === sm.writeback)
+  axi.w.bits.wlast := wcount === 1.U
+  axi.w.bits.wstrb := VecInit(Seq.fill(64)(true.B)).asUInt()
+  axi.b.ready := true.B
+  axi.r.ready := true.B
 
   val arbitrator = Module(new xbar(AXI_ADDR_WIDTH, AXI_DATA_WIDTH, AXI_ID_WIDTH, AXI_SIZE_WIDTH))
   arbitrator.io.aresetn := !reset.asBool()
   arbitrator.io.aclk := clock.asBool()
-  axi.r.rvalid := arbitrator.io.s_axi.rvalid(1)
-  axi.r.rdata := arbitrator.io.s_axi.rdata(2 * AXI_DATA_WIDTH * 8 - 1, AXI_DATA_WIDTH * 8)
-  axi.r.rid := arbitrator.io.s_axi.rid(2 * AXI_ID_WIDTH - 1, AXI_ID_WIDTH)
-  axi.r.rlast := arbitrator.io.s_axi.rlast(1)
-  axi.r.rresp := arbitrator.io.s_axi.rresp(3, 2)
-  io.non_cacheable_in.r.rvalid := arbitrator.io.s_axi.rvalid(0)
-  io.non_cacheable_in.r.rdata := arbitrator.io.s_axi.rdata(AXI_DATA_WIDTH * 8 - 1, 0)
-  io.non_cacheable_in.r.rid := arbitrator.io.s_axi.rid(AXI_ID_WIDTH - 1, 0)
-  io.non_cacheable_in.r.rlast := arbitrator.io.s_axi.rlast(0)
-  io.non_cacheable_in.r.rresp := arbitrator.io.s_axi.rresp(1, 0)
-  arbitrator.io.s_axi.rready := Cat(axi.r.rready, io.non_cacheable_in.r.rready)
+  axi.r.valid := arbitrator.io.s_axi.rvalid(1)
+  axi.r.bits.rdata := arbitrator.io.s_axi.rdata(2 * AXI_DATA_WIDTH * 8 - 1, AXI_DATA_WIDTH * 8)
+  axi.r.bits.rid := arbitrator.io.s_axi.rid(2 * AXI_ID_WIDTH - 1, AXI_ID_WIDTH)
+  axi.r.bits.rlast := arbitrator.io.s_axi.rlast(1)
+  axi.r.bits.rresp := arbitrator.io.s_axi.rresp(3, 2)
+  io.non_cacheable_in.r.valid := arbitrator.io.s_axi.rvalid(0)
+  io.non_cacheable_in.r.bits.rdata := arbitrator.io.s_axi.rdata(AXI_DATA_WIDTH * 8 - 1, 0)
+  io.non_cacheable_in.r.bits.rid := arbitrator.io.s_axi.rid(AXI_ID_WIDTH - 1, 0)
+  io.non_cacheable_in.r.bits.rlast := arbitrator.io.s_axi.rlast(0)
+  io.non_cacheable_in.r.bits.rresp := arbitrator.io.s_axi.rresp(1, 0)
+  arbitrator.io.s_axi.rready := Cat(axi.r.ready, io.non_cacheable_in.r.ready)
 
-  arbitrator.io.s_axi.araddr := Cat(axi.ar.araddr, io.non_cacheable_in.ar.araddr)
-  arbitrator.io.s_axi.arid := Cat(axi.ar.arid, io.non_cacheable_in.ar.arid)
-  arbitrator.io.s_axi.arvalid := Cat(axi.ar.arvalid, io.non_cacheable_in.ar.arvalid)
-  arbitrator.io.s_axi.arsize := Cat(axi.ar.arsize, io.non_cacheable_in.ar.arsize)
-  arbitrator.io.s_axi.arlen := Cat(axi.ar.arlen, io.non_cacheable_in.ar.arlen)
-  arbitrator.io.s_axi.arlock := Cat(axi.ar.arlock, io.non_cacheable_in.ar.arlock)
-  arbitrator.io.s_axi.arburst := Cat(axi.ar.arburst, io.non_cacheable_in.ar.arburst)
-  axi.ar.arready := arbitrator.io.s_axi.arready(1)
-  io.non_cacheable_in.ar.arready := arbitrator.io.s_axi.arready(0)
+  arbitrator.io.s_axi.araddr := Cat(axi.ar.bits.araddr, io.non_cacheable_in.ar.bits.araddr)
+  arbitrator.io.s_axi.arid := Cat(axi.ar.bits.arid, io.non_cacheable_in.ar.bits.arid)
+  arbitrator.io.s_axi.arvalid := Cat(axi.ar.valid, io.non_cacheable_in.ar.valid)
+  arbitrator.io.s_axi.arsize := Cat(axi.ar.bits.arsize, io.non_cacheable_in.ar.bits.arsize)
+  arbitrator.io.s_axi.arlen := Cat(axi.ar.bits.arlen, io.non_cacheable_in.ar.bits.arlen)
+  arbitrator.io.s_axi.arlock := Cat(axi.ar.bits.arlock, io.non_cacheable_in.ar.bits.arlock)
+  arbitrator.io.s_axi.arburst := Cat(axi.ar.bits.arburst, io.non_cacheable_in.ar.bits.arburst)
+  axi.ar.ready := arbitrator.io.s_axi.arready(1)
+  io.non_cacheable_in.ar.ready := arbitrator.io.s_axi.arready(0)
 
-  arbitrator.io.s_axi.wvalid := Cat(axi.w.wvalid, io.non_cacheable_in.w.wvalid)
-  arbitrator.io.s_axi.wlast := Cat(axi.w.wlast, io.non_cacheable_in.w.wlast)
-  arbitrator.io.s_axi.wdata := Cat(axi.w.wdata, io.non_cacheable_in.w.wdata)
-  arbitrator.io.s_axi.wstrb := Cat(axi.w.wstrb, io.non_cacheable_in.w.wstrb)
-  axi.w.wready := arbitrator.io.s_axi.wready(1)
-  io.non_cacheable_in.w.wready := arbitrator.io.s_axi.wready(0)
+  arbitrator.io.s_axi.wvalid := Cat(axi.w.valid, io.non_cacheable_in.w.valid)
+  arbitrator.io.s_axi.wlast := Cat(axi.w.bits.wlast, io.non_cacheable_in.w.bits.wlast)
+  arbitrator.io.s_axi.wdata := Cat(axi.w.bits.wdata, io.non_cacheable_in.w.bits.wdata)
+  arbitrator.io.s_axi.wstrb := Cat(axi.w.bits.wstrb, io.non_cacheable_in.w.bits.wstrb)
+  axi.w.ready := arbitrator.io.s_axi.wready(1)
+  io.non_cacheable_in.w.ready := arbitrator.io.s_axi.wready(0)
 
-  arbitrator.io.s_axi.awvalid := Cat(axi.aw.awvalid, io.non_cacheable_in.aw.awvalid)
-  arbitrator.io.s_axi.awid := Cat(axi.aw.awid, io.non_cacheable_in.aw.awid)
-  arbitrator.io.s_axi.awsize := Cat(axi.aw.awsize, io.non_cacheable_in.aw.awsize)
-  arbitrator.io.s_axi.awlen := Cat(axi.aw.awlen, io.non_cacheable_in.aw.awlen)
-  arbitrator.io.s_axi.awburst := Cat(axi.aw.awburst, io.non_cacheable_in.aw.awburst)
-  arbitrator.io.s_axi.awlock := Cat(axi.aw.awlock, io.non_cacheable_in.aw.awlock)
-  arbitrator.io.s_axi.awaddr := Cat(axi.aw.awaddr, io.non_cacheable_in.aw.awaddr)
-  axi.aw.awready := arbitrator.io.s_axi.awready(1)
-  io.non_cacheable_in.aw.awready := arbitrator.io.s_axi.awready(0)
+  arbitrator.io.s_axi.awvalid := Cat(axi.aw.valid, io.non_cacheable_in.aw.valid)
+  arbitrator.io.s_axi.awid := Cat(axi.aw.bits.awid, io.non_cacheable_in.aw.bits.awid)
+  arbitrator.io.s_axi.awsize := Cat(axi.aw.bits.awsize, io.non_cacheable_in.aw.bits.awsize)
+  arbitrator.io.s_axi.awlen := Cat(axi.aw.bits.awlen, io.non_cacheable_in.aw.bits.awlen)
+  arbitrator.io.s_axi.awburst := Cat(axi.aw.bits.awburst, io.non_cacheable_in.aw.bits.awburst)
+  arbitrator.io.s_axi.awlock := Cat(axi.aw.bits.awlock, io.non_cacheable_in.aw.bits.awlock)
+  arbitrator.io.s_axi.awaddr := Cat(axi.aw.bits.awaddr, io.non_cacheable_in.aw.bits.awaddr)
+  axi.aw.ready := arbitrator.io.s_axi.awready(1)
+  io.non_cacheable_in.aw.ready := arbitrator.io.s_axi.awready(0)
 
-  arbitrator.io.s_axi.bready := Cat(axi.b.bready, io.non_cacheable_in.b.bready)
-  axi.b.bvalid := arbitrator.io.s_axi.bvalid(1)
-  axi.b.bresp := arbitrator.io.s_axi.bresp(3, 2)
-  axi.b.bid := arbitrator.io.s_axi.bid(2 * AXI_ID_WIDTH - 1, AXI_ID_WIDTH)
-  io.non_cacheable_in.b.bvalid := arbitrator.io.s_axi.bvalid(0)
-  io.non_cacheable_in.b.bresp := arbitrator.io.s_axi.bresp(1, 0)
-  io.non_cacheable_in.b.bid := arbitrator.io.s_axi.bid(AXI_ID_WIDTH - 1, 0)
+  arbitrator.io.s_axi.bready := Cat(axi.b.ready, io.non_cacheable_in.b.ready)
+  axi.b.valid := arbitrator.io.s_axi.bvalid(1)
+  axi.b.bits.bresp := arbitrator.io.s_axi.bresp(3, 2)
+  axi.b.bits.bid := arbitrator.io.s_axi.bid(2 * AXI_ID_WIDTH - 1, AXI_ID_WIDTH)
+  io.non_cacheable_in.b.valid := arbitrator.io.s_axi.bvalid(0)
+  io.non_cacheable_in.b.bits.bresp := arbitrator.io.s_axi.bresp(1, 0)
+  io.non_cacheable_in.b.bits.bid := arbitrator.io.s_axi.bid(AXI_ID_WIDTH - 1, 0)
 
   io.ddr_out <> arbitrator.io.m_axi
 }
