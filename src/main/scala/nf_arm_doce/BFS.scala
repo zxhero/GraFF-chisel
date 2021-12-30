@@ -641,7 +641,7 @@ class multi_port_mc(AXI_ADDR_WIDTH : Int = 64, AXI_DATA_WIDTH: Int = 64, AXI_ID_
     val end = Input(Bool())
   })
 
-  val tier_fifo = Seq.tabulate(2)(i => Module(new BRAM_fifo(16, 512, "tier_fifo" + i.toString)))
+  val tier_fifo = Seq.tabulate(2)(i => Module(new BRAM_fifo(16, 512, "tier_fifo")))
   val tier_counter = RegInit(VecInit(Seq.fill(2)(0.U(32.W))))
   val collector = Module(new Collector(AXI_DATA_WIDTH))
 
