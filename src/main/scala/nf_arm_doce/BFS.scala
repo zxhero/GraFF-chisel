@@ -554,7 +554,7 @@ class Collector(AXI_DATA_WIDTH: Int = 64) extends Module{
   })
 
   val collector_fifos = Seq.tabulate(16)(
-    i => Module(new BRAM_fifo(4, 32, ("collector_fifo" + i.toString)))
+    i => Module(new BRAM_fifo(16, 32, ("collector_fifo")))
   )
   val counter = RegInit(0.U(log2Ceil(16).W))
   val collector_data = Wire(Vec(16, UInt(32.W)))
