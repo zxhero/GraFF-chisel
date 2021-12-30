@@ -630,7 +630,7 @@ class multi_port_mc(AXI_ADDR_WIDTH : Int = 64, AXI_DATA_WIDTH: Int = 64, AXI_ID_
     val cacheable_out = Flipped(new streamdata(AXI_DATA_WIDTH, 4))
     val cacheable_in = Vec(16, (new streamdata(4, 4)))
     val non_cacheable_in = new axidata(AXI_ADDR_WIDTH, AXI_DATA_WIDTH, AXI_ID_WIDTH, AXI_SIZE_WIDTH)
-    val ddr_out = Flipped(new axidata_blackbox(AXI_ADDR_WIDTH, AXI_DATA_WIDTH, AXI_ID_WIDTH + 1, AXI_SIZE_WIDTH))
+    val ddr_out = Vec(2, Flipped(new axidata(AXI_ADDR_WIDTH, AXI_DATA_WIDTH, AXI_ID_WIDTH, AXI_SIZE_WIDTH)))
 
     //control path
     val tiers_base_addr = Vec(2, Input(UInt(AXI_ADDR_WIDTH.W)))
@@ -755,57 +755,8 @@ class multi_port_mc(AXI_ADDR_WIDTH : Int = 64, AXI_DATA_WIDTH: Int = 64, AXI_ID_
   axi.b.ready := true.B
   axi.r.ready := true.B
 
-  val arbitrator = Module(new xbar(AXI_ADDR_WIDTH, AXI_DATA_WIDTH, AXI_ID_WIDTH, AXI_SIZE_WIDTH))
-  arbitrator.io.aresetn := !reset.asBool()
-  arbitrator.io.aclk := clock.asBool()
-  axi.r.valid := arbitrator.io.s_axi.rvalid(1)
-  axi.r.bits.rdata := arbitrator.io.s_axi.rdata(2 * AXI_DATA_WIDTH * 8 - 1, AXI_DATA_WIDTH * 8)
-  axi.r.bits.rid := arbitrator.io.s_axi.rid(2 * AXI_ID_WIDTH - 1, AXI_ID_WIDTH)
-  axi.r.bits.rlast := arbitrator.io.s_axi.rlast(1)
-  axi.r.bits.rresp := arbitrator.io.s_axi.rresp(3, 2)
-  io.non_cacheable_in.r.valid := arbitrator.io.s_axi.rvalid(0)
-  io.non_cacheable_in.r.bits.rdata := arbitrator.io.s_axi.rdata(AXI_DATA_WIDTH * 8 - 1, 0)
-  io.non_cacheable_in.r.bits.rid := arbitrator.io.s_axi.rid(AXI_ID_WIDTH - 1, 0)
-  io.non_cacheable_in.r.bits.rlast := arbitrator.io.s_axi.rlast(0)
-  io.non_cacheable_in.r.bits.rresp := arbitrator.io.s_axi.rresp(1, 0)
-  arbitrator.io.s_axi.rready := Cat(axi.r.ready, io.non_cacheable_in.r.ready)
-
-  arbitrator.io.s_axi.araddr := Cat(axi.ar.bits.araddr, io.non_cacheable_in.ar.bits.araddr)
-  arbitrator.io.s_axi.arid := Cat(axi.ar.bits.arid, io.non_cacheable_in.ar.bits.arid)
-  arbitrator.io.s_axi.arvalid := Cat(axi.ar.valid, io.non_cacheable_in.ar.valid)
-  arbitrator.io.s_axi.arsize := Cat(axi.ar.bits.arsize, io.non_cacheable_in.ar.bits.arsize)
-  arbitrator.io.s_axi.arlen := Cat(axi.ar.bits.arlen, io.non_cacheable_in.ar.bits.arlen)
-  arbitrator.io.s_axi.arlock := Cat(axi.ar.bits.arlock, io.non_cacheable_in.ar.bits.arlock)
-  arbitrator.io.s_axi.arburst := Cat(axi.ar.bits.arburst, io.non_cacheable_in.ar.bits.arburst)
-  axi.ar.ready := arbitrator.io.s_axi.arready(1)
-  io.non_cacheable_in.ar.ready := arbitrator.io.s_axi.arready(0)
-
-  arbitrator.io.s_axi.wvalid := Cat(axi.w.valid, io.non_cacheable_in.w.valid)
-  arbitrator.io.s_axi.wlast := Cat(axi.w.bits.wlast, io.non_cacheable_in.w.bits.wlast)
-  arbitrator.io.s_axi.wdata := Cat(axi.w.bits.wdata, io.non_cacheable_in.w.bits.wdata)
-  arbitrator.io.s_axi.wstrb := Cat(axi.w.bits.wstrb, io.non_cacheable_in.w.bits.wstrb)
-  axi.w.ready := arbitrator.io.s_axi.wready(1)
-  io.non_cacheable_in.w.ready := arbitrator.io.s_axi.wready(0)
-
-  arbitrator.io.s_axi.awvalid := Cat(axi.aw.valid, io.non_cacheable_in.aw.valid)
-  arbitrator.io.s_axi.awid := Cat(axi.aw.bits.awid, io.non_cacheable_in.aw.bits.awid)
-  arbitrator.io.s_axi.awsize := Cat(axi.aw.bits.awsize, io.non_cacheable_in.aw.bits.awsize)
-  arbitrator.io.s_axi.awlen := Cat(axi.aw.bits.awlen, io.non_cacheable_in.aw.bits.awlen)
-  arbitrator.io.s_axi.awburst := Cat(axi.aw.bits.awburst, io.non_cacheable_in.aw.bits.awburst)
-  arbitrator.io.s_axi.awlock := Cat(axi.aw.bits.awlock, io.non_cacheable_in.aw.bits.awlock)
-  arbitrator.io.s_axi.awaddr := Cat(axi.aw.bits.awaddr, io.non_cacheable_in.aw.bits.awaddr)
-  axi.aw.ready := arbitrator.io.s_axi.awready(1)
-  io.non_cacheable_in.aw.ready := arbitrator.io.s_axi.awready(0)
-
-  arbitrator.io.s_axi.bready := Cat(axi.b.ready, io.non_cacheable_in.b.ready)
-  axi.b.valid := arbitrator.io.s_axi.bvalid(1)
-  axi.b.bits.bresp := arbitrator.io.s_axi.bresp(3, 2)
-  axi.b.bits.bid := arbitrator.io.s_axi.bid(2 * AXI_ID_WIDTH - 1, AXI_ID_WIDTH)
-  io.non_cacheable_in.b.valid := arbitrator.io.s_axi.bvalid(0)
-  io.non_cacheable_in.b.bits.bresp := arbitrator.io.s_axi.bresp(1, 0)
-  io.non_cacheable_in.b.bits.bid := arbitrator.io.s_axi.bid(AXI_ID_WIDTH - 1, 0)
-
-  io.ddr_out <> arbitrator.io.m_axi
+  io.ddr_out(0) <> axi
+  io.ddr_out(1) <> io.non_cacheable_in
 }
 
 /*
@@ -896,7 +847,7 @@ class controller (AXI_ADDR_WIDTH : Int = 64) extends Module{
 class BFS(AXI_ADDR_WIDTH : Int = 64, AXI_DATA_WIDTH: Int = 64, AXI_ID_WIDTH: Int = 6, AXI_SIZE_WIDTH: Int = 3) extends Module{
   val io = IO(new Bundle() {
     val config = new axilitedata(AXI_ADDR_WIDTH)
-    val PLmemory = Flipped(new axidata_blackbox(AXI_ADDR_WIDTH, AXI_DATA_WIDTH, AXI_ID_WIDTH, AXI_SIZE_WIDTH))
+    val PLmemory = Vec(2, Flipped(new axidata(AXI_ADDR_WIDTH, AXI_DATA_WIDTH, AXI_ID_WIDTH, AXI_SIZE_WIDTH)))
     //val PSmempory = Flipped(Vec(4, new axidata(64, 16, AXI_ID_WIDTH, AXI_SIZE_WIDTH)))
   })
 
