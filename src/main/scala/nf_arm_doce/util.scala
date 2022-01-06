@@ -3,68 +3,40 @@ import chisel3._
 import chisel3.util._
 import nf_arm_doce.{axidata, axidata_blackbox}
 
-class fifo(val size : Int, val width : Int) extends Module {
-  val io = IO(new Bundle {
-    val dataIn = Input(UInt(width.W))
-    val dataOut = Output(UInt(width.W))
-    val writeFlag = Input(Bool())
-    val readFlag = Input(Bool())
-    val full = Output(Bool())
-    val empty = Output(Bool())
-    val rptr = Output(UInt((log2Ceil(size)+1).W))
+class URAM(size : Int = 1024, width : Int = 32) extends BlackBox{
+  val io = IO(new Bundle() {
+    val addra = Input(UInt(log2Ceil(size).W))
+    val clka = Input(Bool())
+    val dina = Input(UInt(width.W))
+    val douta = Input(UInt(width.W))
+    val ena = Input(Bool())
+    val wea = Input(Bool())
+    val addrb = Input(UInt(log2Ceil(size).W))
+    val clkb = Input(Bool())
+    val dinb = Input(UInt(width.W))
+    val doutb = Input(UInt(width.W))
+    val enb = Input(Bool())
+    val web = Input(Bool())
+  })
+}
+
+class BRAM(size : Int = 1024 * 1024, width : Int = 1, val mname : String) extends BlackBox{
+  val io = IO(new Bundle() {
+    val addra = Input(UInt(log2Ceil(size).W))
+    val clka = Input(Bool())
+    val dina = Input(UInt(width.W))
+    //val douta = Input(UInt(width.W))
+    val ena = Input(Bool())
+    val wea = Input(Bool())
+    val addrb = Input(UInt(log2Ceil(size).W))
+    val clkb = Input(Bool())
+    //val dinb = Input(UInt(width.W))
+    val doutb = Output(UInt(width.W))
+    val enb = Input(Bool())
+    //val web = Input(Bool())
   })
 
-  val count = RegInit(0.U((log2Ceil(size)+1).W))
-  val mem = Mem(size, UInt(width.W))
-  val wPointer = RegInit(0.U((log2Ceil(size) + 1).W))
-  val rPointer = RegInit(0.U((log2Ceil(size)+ 1).W))
-  val dataOut = RegInit(0.U(width.W))
-
-  io.rptr := rPointer
-
-  def indexAdd(index : UInt) : UInt = {
-      Mux(index === (size - 1).U, 0.U, index + 1.U)
-  }
-
-  def test_FIN() : Bool = {
-    io.dataOut((width - 1).U) === 1.U && io.empty === false.B
-  }
-
-  when(io.writeFlag === true.B && io.readFlag === true.B) {
-    when(count === 0.U) {
-      mem(wPointer) := io.dataIn
-      wPointer := indexAdd(wPointer)
-      count := count + 1.U
-      dataOut := 0.U
-    }
-    .otherwise {
-      dataOut := mem(rPointer)
-      rPointer := indexAdd(rPointer)
-      mem(wPointer) := io.dataIn
-      wPointer := indexAdd(wPointer)
-    }
-  } .elsewhen (io.writeFlag === true.B && io.readFlag === false.B) {
-    dataOut := 0.U
-    when(count < size.U) {
-      mem(wPointer) := io.dataIn
-      wPointer := indexAdd(wPointer)
-      count := count + 1.U
-    }
-  } .elsewhen (io.writeFlag === false.B && io.readFlag === true.B) {
-    when(count > 0.U) {
-      dataOut := mem(rPointer)
-      rPointer := indexAdd(rPointer)
-      count := count - 1.U
-    } .otherwise {
-      dataOut := 0.U
-    }
-  } .otherwise {
-    dataOut := 0.U
-  }
-
-  io.dataOut := dataOut
-  io.full := (size.U === count)
-  io.empty := (count === 0.U)
+  override def desiredName = mname
 }
 
 class regFile (val size : Int, val width : Int) extends Module {
@@ -99,6 +71,10 @@ class BRAM_fifo(val size : Int, val width : Int, val mname : String) extends Bla
   })
 
   override def desiredName = mname
+
+  def test_FIN() : Bool = {
+    io.dout((width - 1).U) === 1.U && io.empty === false.B
+  }
 }
 
 class xbar(AXI_ADDR_WIDTH : Int = 64, AXI_DATA_WIDTH: Int = 8, AXI_ID_WIDTH: Int = 1, AXI_SIZE_WIDTH: Int = 3) extends BlackBox {
@@ -108,4 +84,22 @@ class xbar(AXI_ADDR_WIDTH : Int = 64, AXI_DATA_WIDTH: Int = 8, AXI_ID_WIDTH: Int
     val aclk = Input(Bool())
     val aresetn = Input(Bool())
   })
+}
+
+class pipeline(width : Int) extends Module{
+  val io = IO(new Bundle() {
+    val dout = Decoupled(UInt(width.W))
+    val din = Flipped(Decoupled(UInt(width.W)))
+  })
+
+  val data = RegInit(0.U(width.W))
+  val valid = RegInit(false.B)
+  when(io.dout.ready){
+    data := io.din.bits
+    valid := io.din.valid
+  }
+
+  io.din.ready := io.dout.ready
+  io.dout.valid := valid
+  io.dout.bits := data
 }
