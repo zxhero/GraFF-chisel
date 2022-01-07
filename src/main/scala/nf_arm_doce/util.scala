@@ -3,18 +3,19 @@ import chisel3._
 import chisel3.util._
 import nf_arm_doce.{axidata, axidata_blackbox}
 
+//URAM and BRAM's read latency is 1 cycle
 class URAM(size : Int = 1024, width : Int = 32) extends BlackBox{
   val io = IO(new Bundle() {
     val addra = Input(UInt(log2Ceil(size).W))
     val clka = Input(Bool())
     val dina = Input(UInt(width.W))
-    val douta = Input(UInt(width.W))
+    val douta = Output(UInt(width.W))
     val ena = Input(Bool())
     val wea = Input(Bool())
     val addrb = Input(UInt(log2Ceil(size).W))
     val clkb = Input(Bool())
     val dinb = Input(UInt(width.W))
-    val doutb = Input(UInt(width.W))
+    val doutb = Output(UInt(width.W))
     val enb = Input(Bool())
     val web = Input(Bool())
   })
@@ -46,6 +47,7 @@ class regFile (val size : Int, val width : Int) extends Module {
     val writeFlag = Input(Bool())
     val rptr = Input(UInt((log2Ceil(size)).W))
     val wptr = Input(UInt((log2Ceil(size)).W))
+    val wcount = Output(UInt(log2Ceil(size).W))
   })
 
   val regs = RegInit(VecInit(Seq.fill(size)(0.U(width.W))))
@@ -55,6 +57,9 @@ class regFile (val size : Int, val width : Int) extends Module {
   when(io.writeFlag){
     regs(io.wptr) := io.dataIn
   }
+
+  val (counterValue, counterWrap) = Counter(io.writeFlag, size)
+  io.wcount := counterValue
 }
 
 class BRAM_fifo(val size : Int, val width : Int, val mname : String) extends BlackBox{
@@ -65,15 +70,24 @@ class BRAM_fifo(val size : Int, val width : Int, val mname : String) extends Bla
     val empty = Output(Bool())
     val dout = Output(UInt(width.W))
     val rd_en = Input(Bool())
-    val data_count = Output(UInt((log2Ceil(size) + 1).W))
+    val data_count = Output(UInt((log2Ceil(size)).W))
     val clk = Input(Bool())
     val srst = Input(Bool())
+    val valid = Output(Bool())
   })
 
   override def desiredName = mname
 
   def test_FIN() : Bool = {
     io.dout((width - 1).U) === 1.U && io.empty === false.B
+  }
+
+  def is_empty() : Bool = {
+    io.data_count === 0.U
+  }
+
+  def is_valid() : Bool = {
+    io.valid
   }
 }
 

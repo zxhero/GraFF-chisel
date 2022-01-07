@@ -5,23 +5,15 @@ import chisel3.experimental.noPrefix
 import chisel3.util.Decoupled
 import chisel3.util._
 
-class streamdata(AXIS_DATA_WIDTH: Int = 8, ELEMENT_WIDTH: Int = 1) extends Bundle {
+class axisdata(AXIS_DATA_WIDTH: Int = 8, ELEMENT_WIDTH: Int = 1) extends Bundle {
   val tdata = Input(UInt((8 * AXIS_DATA_WIDTH).W))
   val tkeep = Input(UInt((AXIS_DATA_WIDTH / ELEMENT_WIDTH).W))
   val tlast = Input(Bool())
-  val tvalid = Input(Bool())
-  val tready = Output(Bool())
 
   def get_ith_data(i: Int): UInt = {
     assert(i < (AXIS_DATA_WIDTH / ELEMENT_WIDTH))
     tdata((i + 1) * ELEMENT_WIDTH * 8 - 1, i * ELEMENT_WIDTH * 8)
   }
-}
-
-class axisdata(AXIS_DATA_WIDTH: Int = 8, ELEMENT_WIDTH: Int = 1) extends Bundle {
-  val tdata = Input(UInt((8 * AXIS_DATA_WIDTH).W))
-  val tkeep = Input(UInt((AXIS_DATA_WIDTH / ELEMENT_WIDTH).W))
-  val tlast = Input(Bool())
 }
 
 class axiar(AXI_ADDR_WIDTH : Int = 44, AXI_ID_WIDTH: Int = 18, AXI_SIZE_WIDTH: Int = 3, NUM : Int = 1) extends Bundle {
@@ -66,6 +58,19 @@ class axidata(AXI_ADDR_WIDTH : Int = 44, AXI_DATA_WIDTH: Int = 16, AXI_ID_WIDTH:
   val w = Flipped(Decoupled(new axiw(AXI_DATA_WIDTH, NUM)))
   val r = Decoupled(new axir(AXI_DATA_WIDTH, AXI_ID_WIDTH, NUM))
   val b = Decoupled(new axib(AXI_ID_WIDTH, NUM))
+}
+
+class streamdata_blackbox(AXIS_DATA_WIDTH: Int = 8, ELEMENT_WIDTH: Int = 1) extends Bundle {
+  val tdata = Input(UInt((8 * AXIS_DATA_WIDTH).W))
+  val tkeep = Input(UInt((AXIS_DATA_WIDTH / ELEMENT_WIDTH).W))
+  val tlast = Input(Bool())
+  val tvalid = Input(Bool())
+  val tready = Output(Bool())
+
+  def get_ith_data(i: Int): UInt = {
+    assert(i < (AXIS_DATA_WIDTH / ELEMENT_WIDTH))
+    tdata((i + 1) * ELEMENT_WIDTH * 8 - 1, i * ELEMENT_WIDTH * 8)
+  }
 }
 
 class axidata_blackbox(AXI_ADDR_WIDTH : Int = 44, AXI_DATA_WIDTH: Int = 16, AXI_ID_WIDTH: Int = 18, AXI_SIZE_WIDTH: Int = 3, NUM : Int = 1) extends Bundle {
@@ -131,8 +136,8 @@ class axilitedata(AXI_ADDR_WIDTH : Int = 44) extends Bundle {
 }
 
 class doceIO (AXI_ADDR_WIDTH : Int = 44, AXI_DATA_WIDTH: Int = 16, AXI_ID_WIDTH: Int = 18, AXI_SIZE_WIDTH: Int = 3) extends Bundle{
-  val doce_axis_rxd = (new streamdata())
-  val doce_axis_txd = Flipped((new streamdata()))
+  val doce_axis_rxd = (new streamdata_blackbox())
+  val doce_axis_txd = Flipped((new streamdata_blackbox()))
   val reset = Input(Bool())
   val clk = Input(Bool())
   val doce_axi_slave = new axidata_blackbox(AXI_ADDR_WIDTH, AXI_DATA_WIDTH, AXI_ID_WIDTH, AXI_SIZE_WIDTH)
@@ -151,8 +156,8 @@ class doce_top(AXI_ADDR_WIDTH : Int = 44, AXI_DATA_WIDTH: Int = 16, AXI_ID_WIDTH
 }
 
 class mpsocIO () extends Bundle{
-  val doce_axis_rxd = Flipped(new streamdata())
-  val doce_axis_txd = ((new streamdata()))
+  val doce_axis_rxd = Flipped(new streamdata_blackbox())
+  val doce_axis_txd = ((new streamdata_blackbox()))
   val gt_txp_out = Output(UInt(4.W))
   val gt_txn_out = Output(UInt(4.W))
   val gt_rxp_in = Input(UInt(4.W))
