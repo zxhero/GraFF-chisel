@@ -6,9 +6,9 @@ import chisel3.util.Decoupled
 import chisel3.util._
 
 class axisdata(AXIS_DATA_WIDTH: Int = 8, ELEMENT_WIDTH: Int = 1) extends Bundle {
-  val tdata = Input(UInt((8 * AXIS_DATA_WIDTH).W))
-  val tkeep = Input(UInt((AXIS_DATA_WIDTH / ELEMENT_WIDTH).W))
-  val tlast = Input(Bool())
+  val tdata = (UInt((8 * AXIS_DATA_WIDTH).W))
+  val tkeep = (UInt((AXIS_DATA_WIDTH / ELEMENT_WIDTH).W))
+  val tlast = (Bool())
 
   def get_ith_data(i: Int): UInt = {
     assert(i < (AXIS_DATA_WIDTH / ELEMENT_WIDTH))
@@ -60,16 +60,28 @@ class axidata(AXI_ADDR_WIDTH : Int = 44, AXI_DATA_WIDTH: Int = 16, AXI_ID_WIDTH:
   val b = Decoupled(new axib(AXI_ID_WIDTH, NUM))
 }
 
-class streamdata_blackbox(AXIS_DATA_WIDTH: Int = 8, ELEMENT_WIDTH: Int = 1) extends Bundle {
-  val tdata = Input(UInt((8 * AXIS_DATA_WIDTH).W))
-  val tkeep = Input(UInt((AXIS_DATA_WIDTH / ELEMENT_WIDTH).W))
-  val tlast = Input(Bool())
-  val tvalid = Input(Bool())
-  val tready = Output(Bool())
+class streamdata_blackbox(AXIS_DATA_WIDTH: Int = 8, ELEMENT_WIDTH: Int = 1, num : Int = 1) extends Bundle {
+  val tdata = Input(UInt((8 * AXIS_DATA_WIDTH * num).W))
+  val tkeep = Input(UInt((num * AXIS_DATA_WIDTH / ELEMENT_WIDTH).W))
+  val tlast = Input(UInt(num.W))
+  val tvalid = Input(UInt(num.W))
+  val tready = Output(UInt(num.W))
 
   def get_ith_data(i: Int): UInt = {
     assert(i < (AXIS_DATA_WIDTH / ELEMENT_WIDTH))
     tdata((i + 1) * ELEMENT_WIDTH * 8 - 1, i * ELEMENT_WIDTH * 8)
+  }
+
+  def connectfrom(d : (axisdata)) = {
+    tdata := d.tdata
+    tlast := d.tlast
+    tkeep := d.tkeep
+  }
+
+  def connectto(d : (axisdata), i: Int) = {
+    d.tdata := tdata(AXIS_DATA_WIDTH * 8 * (i + 1) - 1, AXIS_DATA_WIDTH * 8 * i)
+    d.tlast := tlast(i)
+    d.tkeep := tkeep(AXIS_DATA_WIDTH / ELEMENT_WIDTH * (i + 1) - 1, AXIS_DATA_WIDTH / ELEMENT_WIDTH * i)
   }
 }
 

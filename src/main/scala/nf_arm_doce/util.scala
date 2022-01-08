@@ -1,7 +1,7 @@
 package utils
 import chisel3._
 import chisel3.util._
-import nf_arm_doce.{axidata, axidata_blackbox}
+import nf_arm_doce._
 
 //URAM and BRAM's read latency is 1 cycle
 class URAM(size : Int = 1024, width : Int = 32) extends BlackBox{
@@ -100,13 +100,13 @@ class xbar(AXI_ADDR_WIDTH : Int = 64, AXI_DATA_WIDTH: Int = 8, AXI_ID_WIDTH: Int
   })
 }
 
-class pipeline(width : Int) extends Module{
+class pipeline[T <: Data](gen: T) extends Module{
   val io = IO(new Bundle() {
-    val dout = Decoupled(UInt(width.W))
-    val din = Flipped(Decoupled(UInt(width.W)))
+    val dout = Decoupled(gen)
+    val din = Flipped(Decoupled(gen))
   })
 
-  val data = RegInit(0.U(width.W))
+  val data = RegInit(0.U.asTypeOf(gen))
   val valid = RegInit(false.B)
   when(io.dout.ready){
     data := io.din.bits
@@ -116,4 +116,13 @@ class pipeline(width : Int) extends Module{
   io.din.ready := io.dout.ready
   io.dout.valid := valid
   io.dout.bits := data
+}
+
+class axis_broadcaster (AXIS_DATA_WIDTH: Int = 64, NUM : Int) extends BlackBox{
+  val io = IO(new Bundle() {
+    val aclk = Input(Bool())
+    val aresetn = Input(Bool())
+    val s_axis = new streamdata_blackbox(AXIS_DATA_WIDTH, 1)
+    val m_axis = Flipped(new streamdata_blackbox(AXIS_DATA_WIDTH, 1, NUM))
+  })
 }

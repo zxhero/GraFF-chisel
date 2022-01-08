@@ -434,17 +434,21 @@ class broadcast_xbar(AXIS_DATA_WIDTH: Int = 64, SLAVE_NUM: Int, MASTER_NUM: Int)
   val arbitrator = Module(new Arbiter(new axisdata(AXIS_DATA_WIDTH, 4), MASTER_NUM))
   arbitrator.io.in <> io.ddr_in
 
-  val PES_tready = Wire(Vec(SLAVE_NUM, Bool()))
+  val xbar = Module(new axis_broadcaster(AXIS_DATA_WIDTH, SLAVE_NUM))
+  xbar.io.aclk := clock.asBool()
+  xbar.io.aresetn := ~reset.asBool()
+  xbar.io.s_axis.connectfrom(arbitrator.io.out.bits)
+  xbar.io.s_axis.tvalid := arbitrator.io.out.valid
+  arbitrator.io.out.ready := xbar.io.s_axis.tready
   io.pe_out.zipWithIndex.map{
     case(pe, i) => {
-      pe.valid := arbitrator.io.out.valid
-      pe.bits.tkeep := arbitrator.io.out.bits.tkeep
-      pe.bits.tdata := arbitrator.io.out.bits.tdata
-      pe.bits.tlast := arbitrator.io.out.bits.tlast
-      PES_tready(i) := pe.ready
+      xbar.io.m_axis.connectto(pe.bits, i)
+      pe.valid := xbar.io.m_axis.tvalid(i)
     }
   }
-  arbitrator.io.out.ready := PES_tready.asUInt().andR()
+  xbar.io.m_axis.tready := (VecInit.tabulate(SLAVE_NUM)(
+    i => io.pe_out(i).ready
+  )).asUInt()
 }
 
 /*
@@ -492,7 +496,7 @@ class Scatter(AXIS_DATA_WIDTH: Int = 4, SID: Int) extends Module {
   val write_root = io.start && vid_to_sid(io.root, SID.asUInt())
   val bitmap_arvalid = vertex_in_fifo.is_valid()
   val halt = vertex_out_fifo.io.full === true.B
-  val bitmap_write = Module(new pipeline(32))
+  val bitmap_write = Module(new pipeline(UInt(32.W)))
   bitmap_write.io.din.valid := bitmap_arvalid
   bitmap_write.io.din.bits := vertex_in_fifo.io.dout
   bitmap_write.io.dout.ready := !halt
@@ -574,6 +578,8 @@ class Collector(AXI_DATA_WIDTH: Int = 64) extends Module{
     counter := indexAdd(counter, MuxCase(0.U, Seq.tabulate(16)(
       x => (io.in(16 - x - 1).ready && sorted_valid(16 - x - 1), (16 - x).U)
     )))
+  }.elsewhen(io.flush){
+    counter := 0.U
   }
 
   collector_fifos.zipWithIndex.map{
