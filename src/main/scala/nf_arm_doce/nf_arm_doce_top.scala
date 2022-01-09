@@ -49,7 +49,6 @@ class axir(AXI_DATA_WIDTH: Int = 16, AXI_ID_WIDTH: Int = 18, NUM : Int = 1) exte
   val rdata = (UInt((NUM*8*AXI_DATA_WIDTH).W))
   val rid = (UInt((NUM * AXI_ID_WIDTH).W))
   val rlast = (UInt((NUM * 1).W))
-  val rresp = (UInt((NUM * 2).W))
 }
 
 class axidata(AXI_ADDR_WIDTH : Int = 44, AXI_DATA_WIDTH: Int = 16, AXI_ID_WIDTH: Int = 18, AXI_SIZE_WIDTH: Int = 3, NUM : Int = 1) extends Bundle {
@@ -58,6 +57,12 @@ class axidata(AXI_ADDR_WIDTH : Int = 44, AXI_DATA_WIDTH: Int = 16, AXI_ID_WIDTH:
   val w = Flipped(Decoupled(new axiw(AXI_DATA_WIDTH, NUM)))
   val r = Decoupled(new axir(AXI_DATA_WIDTH, AXI_ID_WIDTH, NUM))
   val b = Decoupled(new axib(AXI_ID_WIDTH, NUM))
+}
+
+class streamdata_id_blackbox(AXIS_DATA_WIDTH: Int = 8, ELEMENT_WIDTH: Int = 1, num : Int = 1,
+                              AXIS_ID_WIDTH: Int = 5)
+      extends streamdata_blackbox(AXIS_DATA_WIDTH, ELEMENT_WIDTH, num){
+  val tid = Input(UInt((num * AXIS_ID_WIDTH).W))
 }
 
 class streamdata_blackbox(AXIS_DATA_WIDTH: Int = 8, ELEMENT_WIDTH: Int = 1, num : Int = 1) extends Bundle {
@@ -82,6 +87,10 @@ class streamdata_blackbox(AXIS_DATA_WIDTH: Int = 8, ELEMENT_WIDTH: Int = 1, num 
     d.tdata := tdata(AXIS_DATA_WIDTH * 8 * (i + 1) - 1, AXIS_DATA_WIDTH * 8 * i)
     d.tlast := tlast(i)
     d.tkeep := tkeep(AXIS_DATA_WIDTH / ELEMENT_WIDTH * (i + 1) - 1, AXIS_DATA_WIDTH / ELEMENT_WIDTH * i)
+  }
+
+  def disable_tkeep() = {
+    tkeep := VecInit(Seq.fill(num * AXIS_DATA_WIDTH / ELEMENT_WIDTH)(true.B)).asUInt()
   }
 }
 

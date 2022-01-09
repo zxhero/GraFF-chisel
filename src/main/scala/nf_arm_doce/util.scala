@@ -70,7 +70,7 @@ class BRAM_fifo(val size : Int, val width : Int, val mname : String) extends Bla
     val empty = Output(Bool())
     val dout = Output(UInt(width.W))
     val rd_en = Input(Bool())
-    val data_count = Output(UInt((log2Ceil(size)).W))
+    val data_count = Output(UInt((log2Ceil(size) + 1).W))
     val clk = Input(Bool())
     val srst = Input(Bool())
     val valid = Output(Bool())
@@ -118,11 +118,14 @@ class pipeline[T <: Data](gen: T) extends Module{
   io.dout.bits := data
 }
 
-class axis_broadcaster (AXIS_DATA_WIDTH: Int = 64, NUM : Int) extends BlackBox{
+class axis_broadcaster (AXIS_DATA_WIDTH: Int = 64, NUM : Int, val mname : String, AXIS_ID_WIDTH: Int = 1) extends BlackBox{
   val io = IO(new Bundle() {
     val aclk = Input(Bool())
     val aresetn = Input(Bool())
-    val s_axis = new streamdata_blackbox(AXIS_DATA_WIDTH, 1)
-    val m_axis = Flipped(new streamdata_blackbox(AXIS_DATA_WIDTH, 1, NUM))
+    val s_axis = new streamdata_id_blackbox(AXIS_DATA_WIDTH, 1, 1, AXIS_ID_WIDTH)
+    val m_axis = Flipped(new streamdata_id_blackbox(AXIS_DATA_WIDTH, 1, NUM, AXIS_ID_WIDTH))
+
   })
+
+  override def desiredName = mname
 }
