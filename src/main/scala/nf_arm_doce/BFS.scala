@@ -370,7 +370,7 @@ class Broadcast(AXI_ADDR_WIDTH : Int = 64, AXI_DATA_WIDTH: Int = 64, AXI_ID_WIDT
   arbi.io.in(0).bits.arsize := log2Ceil(AXI_DATA_WIDTH).U(AXI_SIZE_WIDTH.W)
   arbi.io.in(1).bits.arsize :=  log2Ceil(AXI_DATA_WIDTH).U(AXI_SIZE_WIDTH.W)
   arbi.io.in(0).bits.arid := Cat(1.U(1.W), num_regfile.io.wcount.asTypeOf(UInt((AXI_ID_WIDTH-1).W)))
-  arbi.io.in(1).bits.arid :=  vertex_read_buffer.io.data_count.asTypeOf(UInt(AXI_ID_WIDTH.W))
+  arbi.io.in(1).bits.arid :=  Cat(0.U(1.W), vertex_read_buffer.io.data_count.asTypeOf(UInt((AXI_ID_WIDTH-1).W)))
   vertex_read_buffer.io.rd_en := arbi.io.in(1).ready | upward_status === upward_sm.output_fin
   edge_read_buffer.io.rd_en := arbi.io.in(0).ready
 
@@ -542,7 +542,7 @@ class Scatter(AXIS_DATA_WIDTH: Int = 4, SID: Int) extends Module {
   bitmap.io.addrb := vertex_in_fifo.io.dout(19, 0)
   bitmap.io.clkb := clock.asBool()
   vertex_in_fifo.io.rd_en := !halt
-  vertex_out_fifo.io.wr_en := bitmap_write.io.dout.valid && bitmap.io.doutb =/= 1.U(1.W)
+  vertex_out_fifo.io.wr_en := bitmap_write.io.dout.valid && (bitmap.io.doutb =/= 1.U(1.W) | bitmap_write.io.dout.bits(31) === 1.U(1.W))
   vertex_out_fifo.io.din := bitmap_write.io.dout.bits
   bitmap.io.ena := true.B
   bitmap.io.wea := bitmap_write.io.dout.valid & bitmap_write.io.dout.bits(31) === 0.U(1.W) | write_root
