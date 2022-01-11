@@ -17,20 +17,22 @@ class WB_engine(AXI_ADDR_WIDTH : Int = 64, AXI_DATA_WIDTH: Int = 64, AXI_ID_WIDT
     val level_base_addr = Input(UInt(64.W))
     //val level_size = Input(UInt(64.W))     //2^level_size in bytes
     val level = Input(UInt(32.W))
+    val end = Output(Bool())
+    val flush = Input(Bool())
   })
 
   val buffer = Module(new URAM(512 * 1024,32))
 
   def get_addr_addr(block_index: UInt, size : UInt) : UInt = {
-    Cat(block_index + 1.U(7.W) + (size >> 1.U).asTypeOf(UInt(7.W)))
+    Cat(block_index, 1.U(7.W) + (size >> 1.U).asTypeOf(UInt(7.W)))
   }
 
   def get_level_addr(block_index: UInt, size : UInt) : UInt = {
-    Cat(block_index + (1 + 42 / 2).U(7.W) + size.asTypeOf(UInt(7.W)))
+    Cat(block_index, (1 + 42 / 2).U(7.W) + size.asTypeOf(UInt(7.W)))
   }
 
   def get_size_addr(block_index: UInt, size : UInt) : UInt = {
-    Cat(block_index + 0.U(7.W))
+    Cat(block_index, 0.U(7.W))
   }
 
   //update buffer
@@ -46,6 +48,8 @@ class WB_engine(AXI_ADDR_WIDTH : Int = 64, AXI_DATA_WIDTH: Int = 64, AXI_ID_WIDT
     val wb_level1 = Value(0x7.U)
     val read_level2 = Value(0x8.U)
     val wb_level2 = Value(0x9.U)
+    val check_size = Value(0x10.U)
+    val wb_1block = Value(0x11.U)
   }
   val update_sm = RegInit(sm.read_size)
   val wb_sm = RegInit(sm.idole)
@@ -98,14 +102,27 @@ class WB_engine(AXI_ADDR_WIDTH : Int = 64, AXI_DATA_WIDTH: Int = 64, AXI_ID_WIDT
   val aw_buffer = Module(new BRAM_fifo(32, AXI_ADDR_WIDTH, "addr_fifo"))
   val w_buffer = Module(new BRAM_fifo(32, 32, "vid_fifo"))
   val wb_block_index = RegInit(0.U(12.W))
+  val flush_start = (wb_sm === sm.idole) && io.flush && (update_sm === sm.read_size)
   aw_buffer.io.clk := clock.asBool()
   aw_buffer.io.srst := reset.asBool()
   w_buffer.io.clk := clock.asBool()
   w_buffer.io.srst := reset.asBool()
   when(update_sm === sm.write_size && buffer.io.dina === 84.U){
     wb_block_index := block_index
+  }.elsewhen(flush_start){
+    wb_block_index := 0.U
+  }.elsewhen(wb_sm === sm.wb_1block && wb_block_index =/= (4 * 1024 - 1).U){
+    wb_block_index := wb_block_index + 1.U
   }
-  when(update_sm === sm.write_size && buffer.io.dina === 84.U){
+  //TODO: speculatively check the dirty of a block
+  when(flush_start){
+    wb_sm := sm.read_size
+  }.elsewhen(wb_sm === sm.read_size){
+    wb_sm := sm.check_size
+  }.elsewhen(wb_sm === sm.check_size && buffer.io.doutb === 0.U){
+    wb_sm := sm.wb_1block
+  }.elsewhen(update_sm === sm.write_size && buffer.io.dina === 84.U
+  || wb_sm === sm.check_size && buffer.io.doutb > 0.U){
     wb_sm := sm.read_addr
   }.elsewhen(wb_sm === sm.read_addr) {
     wb_sm := sm.read_level1
@@ -122,9 +139,19 @@ class WB_engine(AXI_ADDR_WIDTH : Int = 64, AXI_DATA_WIDTH: Int = 64, AXI_ID_WIDT
       wb_sm := sm.read_addr
     }
   }.elsewhen(wb_sm === sm.write_size) {
-    wb_sm := sm.idole
+    when(io.flush){
+      wb_sm := sm.wb_1block
+    }.otherwise{
+      wb_sm := sm.idole
+    }
+  }.elsewhen(wb_sm === sm.wb_1block) {
+    when(wb_block_index =/= (4 * 1024 - 1).U){
+      wb_sm := sm.read_size
+    }.otherwise{
+      wb_sm := sm.idole
+    }
   }
-  when(update_sm === sm.write_size && buffer.io.dina === 84.U){
+  when(wb_sm === sm.write_size){
     count := 0.U
   }.elsewhen(wb_sm === sm.wb_level1 && aw_buffer.io.full === false.B && w_buffer.io.full === false.B){
     count := count + 1.U
@@ -133,22 +160,20 @@ class WB_engine(AXI_ADDR_WIDTH : Int = 64, AXI_DATA_WIDTH: Int = 64, AXI_ID_WIDT
   }
 
   val wb_addr_pair = RegInit(0.U(32.W))
-  val wb_level = RegInit(0.U(32.W))
+  val wb_level = buffer.io.doutb
   buffer.io.enb := true.B
   buffer.io.web := (wb_sm === sm.write_size)
   buffer.io.addrb := Mux1H(Seq(
-    (update_sm === sm.read_addr) -> get_addr_addr(wb_block_index, count),
-    (update_sm === sm.read_level1) -> get_level_addr(wb_block_index, count),
-    (update_sm === sm.read_level2) -> get_level_addr(wb_block_index, count),
-    (update_sm === sm.write_size) -> get_size_addr(wb_block_index, count)
+    (wb_sm === sm.read_addr) -> get_addr_addr(wb_block_index, count),
+    (wb_sm === sm.read_level1) -> get_level_addr(wb_block_index, count),
+    (wb_sm === sm.read_level2) -> get_level_addr(wb_block_index, count),
+    (wb_sm === sm.write_size) -> get_size_addr(wb_block_index, count),
+    (wb_sm === sm.read_size) -> get_size_addr(wb_block_index, count)
   ))
   buffer.io.dinb := 0.U
   buffer.io.clkb := clock.asBool()
-  when(wb_sm === sm.read_addr){
+  when(wb_sm === sm.read_level1){
     wb_addr_pair := buffer.io.doutb
-  }
-  when(wb_sm === sm.read_level1 || wb_sm === sm.read_level2){
-    wb_level := buffer.io.doutb
   }
 
   aw_buffer.io.wr_en := wb_sm === sm.wb_level1 || wb_sm === sm.wb_level2
@@ -172,6 +197,8 @@ class WB_engine(AXI_ADDR_WIDTH : Int = 64, AXI_DATA_WIDTH: Int = 64, AXI_ID_WIDT
   w_buffer.io.rd_en := io.ddr_w.ready
 
   io.ddr_b.ready := true.B
+
+  io.end := wb_sm === sm.wb_1block && wb_block_index === (4 * 1024 - 1).U
 }
 
 class Apply(AXI_ADDR_WIDTH : Int = 64, AXI_DATA_WIDTH: Int = 64, AXI_ID_WIDTH: Int = 6, AXI_SIZE_WIDTH: Int = 3) extends Module{
@@ -186,6 +213,8 @@ class Apply(AXI_ADDR_WIDTH : Int = 64, AXI_DATA_WIDTH: Int = 64, AXI_ID_WIDTH: I
     val level_base_addr = Input(UInt(64.W))
     //val level_size = Input(UInt(64.W))     //2^level_size in bytes
     val signal = Input(Bool())    //used in prefetch mode
+    val end = Output(Bool())
+    val flush = Input(Bool())
   })
 
   //write value array
@@ -211,6 +240,8 @@ class Apply(AXI_ADDR_WIDTH : Int = 64, AXI_DATA_WIDTH: Int = 64, AXI_ID_WIDTH: I
   io.ddr_aw <> update_engine.io.ddr_aw
   io.ddr_w <> update_engine.io.ddr_w
   io.ddr_b <> update_engine.io.ddr_b
+  io.end := update_engine.io.end
+  update_engine.io.flush := io.flush & vertex_update_buffer.is_empty()
 }
 
 class axis_arbitrator(AXIS_DATA_WIDTH: Int = 4, NUM : Int = 16, ELEMENT_WIDTH: Int = 4) extends Module{
@@ -506,6 +537,10 @@ class Scatter(AXIS_DATA_WIDTH: Int = 4, SID: Int) extends Module {
     vid(31, 20) === sid
   }
 
+  def vid2bitmap_addr(vid: UInt) : UInt = {
+    vid(19, 0)
+  }
+
   val filtered_keep = Wire(Vec(16, Bool()))
   filtered_keep.zipWithIndex.map{
     case(k, i) => {
@@ -539,7 +574,7 @@ class Scatter(AXIS_DATA_WIDTH: Int = 4, SID: Int) extends Module {
   vertex_in_fifo.io.wr_en := arbi.io.ddr_out.valid
   arbi.io.ddr_out.ready := vertex_in_fifo.io.full === false.B
   bitmap.io.enb :=  true.B//bitmap_arvalid
-  bitmap.io.addrb := vertex_in_fifo.io.dout(19, 0)
+  bitmap.io.addrb := vid2bitmap_addr(vertex_in_fifo.io.dout)
   bitmap.io.clkb := clock.asBool()
   vertex_in_fifo.io.rd_en := !halt
   vertex_out_fifo.io.wr_en := bitmap_write.io.dout.valid && (bitmap.io.doutb =/= 1.U(1.W) | bitmap_write.io.dout.bits(31) === 1.U(1.W))
@@ -548,7 +583,7 @@ class Scatter(AXIS_DATA_WIDTH: Int = 4, SID: Int) extends Module {
   bitmap.io.wea := bitmap_write.io.dout.valid & bitmap_write.io.dout.bits(31) === 0.U(1.W) | write_root
   bitmap.io.clka := clock.asBool()
   bitmap.io.dina := 1.U
-  bitmap.io.addra := Mux(write_root, io.root(19, 0), bitmap_write.io.dout.bits(19, 0))
+  bitmap.io.addra := Mux(write_root, vid2bitmap_addr(io.root), vid2bitmap_addr(bitmap_write.io.dout.bits))
   vertex_out_fifo.io.rd_en := io.ddr_out.ready //| vertex_out_fifo.test_FIN()
   io.ddr_out.valid := vertex_out_fifo.is_valid() & vertex_out_fifo.io.dout(31) === 0.U
   io.ddr_out.bits.tkeep := true.B
@@ -818,6 +853,8 @@ class controller (AXI_ADDR_WIDTH : Int = 64) extends Module{
     val unvisited_size = Input(UInt(32.W))
     val traveled_edges = Input(UInt(64.W))
     val config = (new axilitedata(AXI_ADDR_WIDTH))
+    val flush_cache = Output(Bool())
+    val flush_cache_end = Input(Bool())
   })
 
   //0 --- start and end register
@@ -842,6 +879,7 @@ class controller (AXI_ADDR_WIDTH : Int = 64) extends Module{
     val fin   = Value(0x2.U) // i "imm"   -> 001_0011
     val end = Value(0x3.U)
     val start = Value(0x4.U)
+    val flush_cache = Value(0x5.U)
   }
   val status = RegInit(sm.idole)
   val start = controls.io.data(0)(0)
@@ -864,10 +902,12 @@ class controller (AXI_ADDR_WIDTH : Int = 64) extends Module{
     status := sm.fin
   }.elsewhen(status === sm.fin){
     when(io.unvisited_size === 0.U){
-      status := sm.end
+      status := sm.flush_cache
     }.otherwise{
       status := sm.exe
     }
+  }.elsewhen(status === sm.flush_cache && io.flush_cache_end){
+    status := sm.end
   }.elsewhen(status === sm.end){
     status := sm.idole
   }
@@ -892,6 +932,7 @@ class controller (AXI_ADDR_WIDTH : Int = 64) extends Module{
   io.data := controls.io.data
   io.level := level
   io.start := status === sm.start
+  io.flush_cache := status === sm.flush_cache
 }
 
 class BFS(AXI_ADDR_WIDTH : Int = 64, AXI_DATA_WIDTH: Int = 64, AXI_ID_WIDTH: Int = 6, AXI_SIZE_WIDTH: Int = 3) extends Module{
@@ -940,6 +981,8 @@ class BFS(AXI_ADDR_WIDTH : Int = 64, AXI_DATA_WIDTH: Int = 64, AXI_ID_WIDTH: Int
   controls.io.config <> io.config
   controls.io.traveled_edges := Broadcasts.io.traveled_edges
   controls.io.unvisited_size := pl_mc.io.unvisited_size
+  controls.io.flush_cache_end := Applys.io.end
+  Applys.io.flush := controls.io.flush_cache
   Gathers.io.signal := controls.io.signal
   Applys.io.signal := controls.io.signal
   Broadcasts.io.signal := controls.io.signal
