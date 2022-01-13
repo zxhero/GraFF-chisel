@@ -7,6 +7,7 @@ import chisel3.util._
 import utils._
 import numa.LookupTable
 
+//TODO: rename to cache
 class WB_engine(AXI_ADDR_WIDTH : Int = 64, AXI_DATA_WIDTH: Int = 64, AXI_ID_WIDTH: Int = 6, AXI_SIZE_WIDTH: Int = 3) extends Module{
   val io = IO(new Bundle() {
     val ddr_aw = Decoupled(new axiaw(AXI_ADDR_WIDTH, AXI_ID_WIDTH, AXI_SIZE_WIDTH, 1))
@@ -244,6 +245,7 @@ class Apply(AXI_ADDR_WIDTH : Int = 64, AXI_DATA_WIDTH: Int = 64, AXI_ID_WIDTH: I
   update_engine.io.flush := io.flush & vertex_update_buffer.is_empty()
 }
 
+//TODO: use axis_width_converter IP
 class axis_arbitrator(AXIS_DATA_WIDTH: Int = 4, NUM : Int = 16, ELEMENT_WIDTH: Int = 4) extends Module{
   val io = IO(new Bundle() {
     val xbar_in = Flipped(Decoupled(new axisdata(AXIS_DATA_WIDTH * NUM, ELEMENT_WIDTH)))
@@ -303,6 +305,16 @@ class Gather(AXI_DATA_WIDTH: Int = 64) extends Module{
     }
   }
   broadcaster.io.m_axis.tready := VecInit.tabulate(2)(i => io.gather_out(i).ready).asUInt()
+}
+
+//TODO: add read cache
+class readEdge_engine(AXI_ADDR_WIDTH : Int = 64, AXI_DATA_WIDTH: Int = 64, AXI_ID_WIDTH: Int = 6, AXI_SIZE_WIDTH: Int = 3, EMBEDDING : Int = 14) extends Module{
+  val io = IO(new Bundle() {
+    val in = Flipped(Decoupled(new axir(AXI_DATA_WIDTH, AXI_ID_WIDTH)))
+    val out = Decoupled(new axiar(AXI_ADDR_WIDTH, AXI_ID_WIDTH, AXI_SIZE_WIDTH, 1))
+  })
+
+
 }
 
 class Broadcast(AXI_ADDR_WIDTH : Int = 64, AXI_DATA_WIDTH: Int = 64, AXI_ID_WIDTH: Int = 6, AXI_SIZE_WIDTH: Int = 3, EMBEDDING : Int = 14) extends Module{
@@ -594,16 +606,35 @@ class Scatter(AXIS_DATA_WIDTH: Int = 4, SID: Int) extends Module {
   io.end := vertex_out_fifo.test_FIN()
 }
 
-class Collector(AXI_DATA_WIDTH: Int = 64) extends Module{
+//TODO: Try to use fifoIO
+class multi_channel_fifo(AXI_DATA_WIDTH: Int = 64, size : Int = 16) extends Module{
   val io = IO(new Bundle() {
     val in = Vec(16, Flipped(Decoupled(new axisdata(4, 4))))
-    val out = Decoupled(new axisdata(AXI_DATA_WIDTH, 4))
+    val out = new Bundle() {
+      val full = Output(Bool())
+      val din = Input(UInt((8 * AXI_DATA_WIDTH).W))
+      val wr_en = Input(Bool())
+      val empty = Output(Bool())
+      val dout = Output(UInt((8 * AXI_DATA_WIDTH).W))
+      val rd_en = Input(Bool())
+      val data_count = Output(UInt((log2Ceil(size * AXI_DATA_WIDTH / 4) + 1).W))
+      val valid = Output(Bool())
+    }
     val flush = Input(Bool())
   })
+
+  def is_empty() : Bool = {
+    io.out.data_count === 0.U
+  }
+
+  def is_valid() : Bool = {
+    io.out.valid
+  }
 
   val collector_fifos = Seq.tabulate(16)(
     i => Module(new BRAM_fifo(16, 32, ("collector_fifo_0")))
   )
+  val fifos_ready = Seq.tabulate(16)(i => collector_fifos(i).io.full === false.B).reduce(_&_)
   val counter = RegInit(0.U(log2Ceil(16).W))
   val collector_data = Wire(Vec(16, UInt(32.W)))
   val sorted_data = Wire(Vec(16, UInt(32.W)))
@@ -623,7 +654,7 @@ class Collector(AXI_DATA_WIDTH: Int = 64) extends Module{
 
   io.in.zipWithIndex.map{
     case(in, i) => {
-      in.ready := Seq.tabulate(16)(i => collector_fifos(i).io.full === false.B).reduce(_&_)
+      in.ready := Mux(io.out.wr_en, false.B, fifos_ready)
     }
   }
   sorted_data.zipWithIndex.map{
@@ -655,20 +686,20 @@ class Collector(AXI_DATA_WIDTH: Int = 64) extends Module{
     case (f, i) => {
       val fifo_in_data = Mux1H(Seq.tabulate(16)(x => (indexSub(counter, i.U) === x.U, sorted_data(x))))
       val fifo_in_valid = Mux1H(Seq.tabulate(16)(x => (indexSub(counter, i.U) === x.U, sorted_valid(x))))
-      f.io.din := fifo_in_data
-      f.io.wr_en := fifo_in_valid
+      f.io.din := Mux(io.out.wr_en, io.out.din(32 * (i + 1) - 1, 32 * i), fifo_in_data)
+      f.io.wr_en := Mux(io.out.wr_en, io.out.wr_en ,fifo_in_valid)
       collector_data(i) := f.io.dout
       f.io.clk := clock.asBool()
       f.io.srst := reset.asBool()
-      f.io.rd_en := io.out.valid & io.out.ready
+      f.io.rd_en := io.out.rd_en
     }
   }
 
-  io.out.valid := Mux(io.flush, Seq.tabulate(16)(i => collector_fifos(i).is_valid()).reduce(_|_),
-    Seq.tabulate(16)(i => collector_fifos(i).is_valid()).reduce(_&_))
-  io.out.bits.tdata := collector_data.asUInt()
-  io.out.bits.tlast := true.B
-  io.out.bits.tkeep := (VecInit.tabulate(16)(i => collector_fifos(i).is_valid())).asUInt()
+  io.out.valid := Seq.tabulate(16)(i => collector_fifos(i).is_valid()).reduce(_|_)
+  io.out.dout := collector_data.asUInt()
+  io.out.data_count := collector_fifos.map{i => i.io.data_count.asTypeOf(UInt((log2Ceil(size * AXI_DATA_WIDTH / 4) + 1).W))}.reduce(_+_)
+  io.out.full := ~fifos_ready
+  io.out.empty := collector_fifos.map{i => i.io.empty}.reduce(_&_)
 }
 
 /*
@@ -691,16 +722,13 @@ class multi_port_mc(AXI_ADDR_WIDTH : Int = 64, AXI_DATA_WIDTH: Int = 64, AXI_ID_
     val end = Input(Bool())
   })
 
-  val tier_fifo = Seq.tabulate(2)(i => Module(new BRAM_fifo(16, 512, "tier_fifo_0")))
+  val tier_fifo = Seq.tabulate(2)(i => Module(new multi_channel_fifo(AXI_DATA_WIDTH, 16)))
   val tier_counter = RegInit(VecInit(Seq.fill(2)(0.U(32.W))))
-  val collector = Module(new Collector(AXI_DATA_WIDTH))
 
   object sm extends ChiselEnum {
     val idole = Value(0x0.U)
     val next_tier_is_0  = Value(0x1.U) // i "load"  -> 000_0011
     val next_tier_is_1   = Value(0x2.U) // i "imm"   -> 001_0011
-    val flushing_0 = Value(0x3.U)
-    val flushing_1 = Value(0x4.U)
     val writeback = Value(0x5.U)
     val readback = Value(0x6.U)
     val start = Value(0x7.U)
@@ -722,27 +750,23 @@ class multi_port_mc(AXI_ADDR_WIDTH : Int = 64, AXI_DATA_WIDTH: Int = 64, AXI_ID_
   }.elsewhen(status === sm.sync_send_0 && io.cacheable_out.valid && io.cacheable_out.ready){
     status := sm.signal_wait_0
   }.elsewhen(io.signal && status === sm.signal_wait_0){
-    status := sm.flushing_1
+    status := sm.next_tier_is_0
   }.elsewhen(status === sm.next_tier_is_0 && tier_counter(1) === 0.U){
     status := sm.sync_send_1
   }.elsewhen(status === sm.sync_send_1 && io.cacheable_out.valid && io.cacheable_out.ready){
     status := sm.signal_wait_1
   }.elsewhen(io.signal && status === sm.signal_wait_1){
-    status := sm.flushing_0
-  }.elsewhen( status === sm.flushing_1){
-    status := sm.next_tier_is_0
-  }.elsewhen( status === sm.flushing_0){
     status := sm.next_tier_is_1
   }.elsewhen(io.end){
     status := sm.idole
   }
 
-  val next_tier_mask = Cat(status === sm.next_tier_is_1 | status === sm.flushing_1 | status === sm.sync_send_0 | status === sm.signal_wait_0,
-      status === sm.next_tier_is_0 | status === sm.flushing_0 | status === sm.sync_send_1 | status === sm.signal_wait_1)
+  val next_tier_mask = Cat(status === sm.next_tier_is_1 | status === sm.sync_send_0 | status === sm.signal_wait_0,
+      status === sm.next_tier_is_0 | status === sm.sync_send_1 | status === sm.signal_wait_1)
   val axi = Wire(Flipped(new axidata(AXI_ADDR_WIDTH, AXI_DATA_WIDTH, AXI_ID_WIDTH, AXI_SIZE_WIDTH)))
   val tier_base_addr = RegInit(VecInit(Seq.fill(2)(0.U(AXI_ADDR_WIDTH.W))))
   val tier_status = RegInit(VecInit(Seq.fill(2)(sm.idole)))
-  val step_fin = status === sm.flushing_1 | status === sm.flushing_0
+  val step_fin = io.signal && (status === sm.signal_wait_0 | status === sm.signal_wait_1)
   tier_base_addr.zipWithIndex.map{
     case(a, i) => {
       when((io.start && status === sm.idole) | step_fin){
@@ -759,22 +783,28 @@ class multi_port_mc(AXI_ADDR_WIDTH : Int = 64, AXI_DATA_WIDTH: Int = 64, AXI_ID_
       when(next_tier_mask(i) && io.cacheable_in.map{ case i => i.ready && i.valid }.reduce(_|_)){
         c := c + io.cacheable_in.map{ case i => (i.ready && i.valid).asTypeOf(UInt(6.W)) }.reduce(_+_)
       }.elsewhen(!next_tier_mask(i) && io.cacheable_out.ready && io.cacheable_out.valid){
-        c := Mux(c > 16.U, c - 16.U, 0.U)
+        c := Mux(tier_fifo(i).io.out.data_count > 16.U, c - 16.U,
+          Mux(c > tier_fifo(i).io.out.data_count, c - tier_fifo(i).io.out.data_count, 0.U))
       }
     }
   }
   tier_fifo.zipWithIndex.map{
     case(f, i) => {
-      f.io.rd_en := Mux(next_tier_mask(i), axi.w.ready, io.cacheable_out.ready)
-      f.io.wr_en := Mux(next_tier_mask(i), collector.io.out.valid, axi.r.valid)
-      f.io.din := Mux(next_tier_mask(i), collector.io.out.bits.tdata, axi.r.bits.rdata)
-      f.io.clk := clock.asBool()
-      f.io.srst := reset.asBool()
+      f.io.out.rd_en := Mux(next_tier_mask(i), axi.w.ready, io.cacheable_out.ready)
+      f.io.out.wr_en := Mux(next_tier_mask(i), 0.U, axi.r.valid)
+      f.io.out.din := Mux(next_tier_mask(i), 0.U, axi.r.bits.rdata)
+      f.io.flush := io.signal && (status === sm.signal_wait_0 || status === sm.signal_wait_1)
+      f.io.in.zipWithIndex.map{
+        case(in, x) => {
+          in.valid := Mux(next_tier_mask(i), io.cacheable_in(x).valid, false.B)
+          in.bits := Mux(next_tier_mask(i), io.cacheable_in(x).bits, 0.U.asTypeOf(in.bits.cloneType))
+        }
+      }
     }
   }
   tier_status.zipWithIndex.map{
     case (s, i) => {
-      when(next_tier_mask(i) && tier_fifo(i).io.full && s === sm.idole){
+      when(next_tier_mask(i) && tier_fifo(i).io.out.full && s === sm.idole){
         s := sm.writeback
       }.elsewhen(!next_tier_mask(i) && tier_fifo(i).is_empty() && tier_counter(i) =/= 0.U && s === sm.idole){
         s := sm.readback
@@ -790,9 +820,11 @@ class multi_port_mc(AXI_ADDR_WIDTH : Int = 64, AXI_DATA_WIDTH: Int = 64, AXI_ID_
     }
   }
 
-  collector.io.in <> io.cacheable_in
-  collector.io.flush := status === sm.flushing_0 | status === sm.flushing_1
-  collector.io.out.ready := Mux(next_tier_mask(0), tier_fifo(0).io.full === false.B, tier_fifo(1).io.full === false.B)
+  io.cacheable_in.zipWithIndex.map{
+    case (in, i) => {
+      in.ready := Mux(next_tier_mask(0), tier_fifo(0).io.in(i).ready, tier_fifo(1).io.in(i).ready)
+    }
+  }
   io.unvisited_size := Mux(next_tier_mask(0), tier_counter(0), tier_counter(1))
   io.cacheable_out.valid := MuxCase(status === sm.start,
     Array(next_tier_mask(0) -> (tier_fifo(1).is_valid() | status === sm.sync_send_1),
@@ -800,11 +832,11 @@ class multi_port_mc(AXI_ADDR_WIDTH : Int = 64, AXI_DATA_WIDTH: Int = 64, AXI_ID_
   io.cacheable_out.bits.tdata := MuxCase(io.root.asTypeOf(UInt(512.W)),
     Array((status === sm.sync_send_0) -> "x80000000".asUInt(512.W),
           (status === sm.sync_send_1) -> "x80000000".asUInt(512.W),
-          next_tier_mask(0) -> tier_fifo(1).io.dout,
-          next_tier_mask(1) -> tier_fifo(0).io.dout))
+          next_tier_mask(0) -> tier_fifo(1).io.out.dout,
+          next_tier_mask(1) -> tier_fifo(0).io.out.dout))
   io.cacheable_out.bits.tkeep := Mux(status === sm.start | status === sm.sync_send_0 | status === sm.sync_send_1, 1.U(16.W),
     VecInit(Seq.tabulate(16)(
-      i => Mux(next_tier_mask(0), tier_counter(1) > i.U, tier_counter(0) > i.U)
+      i => Mux(next_tier_mask(0), tier_fifo(1).io.out.data_count > i.U, tier_fifo(0).io.out.data_count > i.U)
     )).asUInt())
   io.cacheable_out.bits.tlast := true.B
 
@@ -828,7 +860,7 @@ class multi_port_mc(AXI_ADDR_WIDTH : Int = 64, AXI_DATA_WIDTH: Int = 64, AXI_ID_
   axi.ar.bits.arsize := 6.U
   axi.ar.bits.arlock := 0.U
   axi.ar.valid := Mux(next_tier_mask(0), tier_status(1) === sm.readback, tier_status(0) === sm.readback)
-  axi.w.bits.wdata := Mux(next_tier_mask(0), tier_fifo(0).io.dout, tier_fifo(1).io.dout)
+  axi.w.bits.wdata := Mux(next_tier_mask(0), tier_fifo(0).io.out.dout, tier_fifo(1).io.out.dout)
   axi.w.valid := Mux(next_tier_mask(0), tier_status(0) === sm.writebackdata, tier_status(1) === sm.writebackdata)
   axi.w.bits.wlast := wcount === 1.U
   axi.w.bits.wstrb := VecInit(Seq.fill(64)(true.B)).asUInt()
