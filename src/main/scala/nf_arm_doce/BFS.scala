@@ -312,9 +312,72 @@ class readEdge_engine(AXI_ADDR_WIDTH : Int = 64, AXI_DATA_WIDTH: Int = 64, AXI_I
   val io = IO(new Bundle() {
     val in = Flipped(Decoupled(new axir(AXI_DATA_WIDTH, AXI_ID_WIDTH)))
     val out = Decoupled(new axiar(AXI_ADDR_WIDTH, AXI_ID_WIDTH, AXI_SIZE_WIDTH, 1))
+    //control signal
+    val edge_base_addr = Input(UInt(64.W))
+    val free_ptr = Input(UInt((AXI_ID_WIDTH-1).W))
+    val read_edge_num = Output(UInt(32.W))
   })
 
+  def get_edge_array_index(mdata : UInt) : UInt = {
+    mdata(31, 0)
+  }
 
+  def get_edge_count(mdata : UInt) : UInt = {
+    mdata(63, 32)
+  }
+
+  //read edge array
+  val edge_read_buffer = Module(new BRAM_fifo(32, 64, "meta_fifo"))
+  edge_read_buffer.io.clk := clock.asBool()
+  edge_read_buffer.io.srst := reset.asBool()
+  edge_read_buffer.io.din := io.in.bits.rdata(8 * 8 - 1, 0)
+  edge_read_buffer.io.wr_en := !io.in.bits.rid(AXI_ID_WIDTH - 1) & io.in.valid & (get_edge_count(io.in.bits.rdata) > EMBEDDING.asUInt())
+  io.in.ready := edge_read_buffer.io.full === false.B
+
+  val remainning_edges = (get_edge_count(edge_read_buffer.io.dout) - EMBEDDING.asUInt())
+  // TODO we assume number of edges of a vertex is less than 4096 + 14 for now.
+  object cache_sm extends ChiselEnum {
+    val idole = Value(0x0.U)
+    val next_page  = Value(0x1.U) // i "load"  -> 000_0011
+  }
+  val cache_status = RegInit(cache_sm.idole)
+  val counter = RegInit(0.U(32.W))
+  val next_counter = Wire(UInt(32.W))
+  val araddr = RegInit(0.U(AXI_ADDR_WIDTH.W))
+  next_counter := counter - 1024.U
+  when(remainning_edges.asUInt() > 1024.U && io.out.ready && io.out.valid && cache_status === cache_sm.idole){
+    cache_status := cache_sm.next_page
+    counter := remainning_edges - 1024.U
+    araddr := io.edge_base_addr + (get_edge_array_index(edge_read_buffer.io.dout) << 2).asUInt() + 4096.U
+  }.elsewhen(io.out.ready && io.out.valid && cache_status === cache_sm.next_page){
+    when(counter <= 1024.U){
+      cache_status := cache_sm.idole
+      counter := 0.U
+      araddr := 0.U
+    }.otherwise{
+      counter := next_counter
+      araddr := araddr + 4096.U
+    }
+  }
+
+  val num_vertex = MuxCase(1024.U(32.W), Array(
+    (cache_status === cache_sm.idole && remainning_edges <= 1024.U) -> (remainning_edges),
+    (cache_status === cache_sm.next_page && counter <= 1024.U) -> counter
+  ))
+  var arlen = Mux(((num_vertex >> log2Ceil(AXI_DATA_WIDTH/4)) << log2Ceil(AXI_DATA_WIDTH/4)).asUInt() < num_vertex,
+    (num_vertex >> log2Ceil(AXI_DATA_WIDTH/4)),
+    (num_vertex >> log2Ceil(AXI_DATA_WIDTH/4)).asUInt() - 1.U)
+  io.out.bits.araddr := Mux(cache_status === cache_sm.idole,
+    io.edge_base_addr + (get_edge_array_index(edge_read_buffer.io.dout) << 2),
+    araddr)
+  io.out.valid := Mux(cache_status === cache_sm.idole, edge_read_buffer.is_valid(), true.B)
+  io.out.bits.arlen := arlen.asUInt()
+  io.out.bits.arburst := 1.U(2.W)
+  io.out.bits.arlock := 0.U
+  io.out.bits.arsize := log2Ceil(AXI_DATA_WIDTH).U(AXI_SIZE_WIDTH.W)
+  io.out.bits.arid := Cat(1.U(1.W), io.free_ptr)
+  edge_read_buffer.io.rd_en := io.out.ready & cache_status === cache_sm.idole
+  io.read_edge_num := num_vertex
 }
 
 class Broadcast(AXI_ADDR_WIDTH : Int = 64, AXI_DATA_WIDTH: Int = 64, AXI_ID_WIDTH: Int = 6, AXI_SIZE_WIDTH: Int = 3, EMBEDDING : Int = 14) extends Module{
@@ -332,14 +395,6 @@ class Broadcast(AXI_ADDR_WIDTH : Int = 64, AXI_DATA_WIDTH: Int = 64, AXI_ID_WIDT
   })
   assert(AXI_DATA_WIDTH >= 8)
   assert(AXI_ID_WIDTH > log2Ceil(32))
-
-  def get_edge_array_index(mdata : UInt) : UInt = {
-    mdata(31, 0)
-  }
-
-  def get_edge_count(mdata : UInt) : UInt = {
-    mdata(63, 32)
-  }
 
   //upward
   object upward_sm extends ChiselEnum {
@@ -361,8 +416,8 @@ class Broadcast(AXI_ADDR_WIDTH : Int = 64, AXI_DATA_WIDTH: Int = 64, AXI_ID_WIDT
   vertex_read_buffer.io.din := io.gather_in.bits.tdata
   io.gather_in.ready := vertex_read_buffer.io.full === false.B
 
-  //read edge array
-  val edge_read_buffer = Module(new BRAM_fifo(32, 64, "meta_fifo"))
+  val edge_cache = Module(new readEdge_engine(AXI_ADDR_WIDTH, AXI_DATA_WIDTH, AXI_ID_WIDTH, AXI_SIZE_WIDTH, EMBEDDING))
+  edge_cache.io.edge_base_addr := io.edge_base_addr
   val r_demux = Module(new axis_broadcaster(AXI_DATA_WIDTH, 2, "r_demux", AXI_ID_WIDTH))
   val r_demux_out = Wire(Vec(2, Decoupled(new axir(AXI_DATA_WIDTH, AXI_ID_WIDTH))))
   r_demux.io.s_axis.tvalid := io.ddr_r.valid
@@ -382,46 +437,28 @@ class Broadcast(AXI_ADDR_WIDTH : Int = 64, AXI_DATA_WIDTH: Int = 64, AXI_ID_WIDT
     }
   }
   r_demux.io.m_axis.tready := VecInit.tabulate(2)(i => r_demux_out(i).ready).asUInt()
-
-  edge_read_buffer.io.clk := clock.asBool()
-  edge_read_buffer.io.srst := reset.asBool()
-  edge_read_buffer.io.din := r_demux_out(1).bits.rdata(8 * 8 - 1, 0)
-  edge_read_buffer.io.wr_en := !r_demux_out(1).bits.rid(AXI_ID_WIDTH - 1) & r_demux_out(1).valid & (get_edge_count(r_demux_out(1).bits.rdata) > EMBEDDING.asUInt())
-  r_demux_out(1).ready := edge_read_buffer.io.full === false.B
+  edge_cache.io.in <> r_demux_out(1)
 
   val arbi = Module(new Arbiter(new axiar(AXI_ADDR_WIDTH, AXI_ID_WIDTH, AXI_SIZE_WIDTH, 1), 2))
-  //TODO we should ensure regfile is big enough in case the data return slowly
-  val num_regfile = Module(new regFile(32, 32))
-
-
   io.ddr_ar <> arbi.io.out
-  arbi.io.in(0).bits.araddr := io.edge_base_addr + (get_edge_array_index(edge_read_buffer.io.dout) << 2)
   arbi.io.in(1).bits.araddr :=  io.embedding_base_addr + (vertex_read_buffer.io.dout << log2Ceil(4 * EMBEDDING + 8))
-  arbi.io.in(0).valid := edge_read_buffer.is_valid()
   arbi.io.in(1).valid :=  vertex_read_buffer.is_valid() && vertex_read_buffer.io.dout(31) === 0.U
-  val remainning_edges = (get_edge_count(edge_read_buffer.io.dout) - EMBEDDING.asUInt())
-  // TODO we assume number of edges of a vertex is less than 4096 + 14 for now.
-  val arlen = Mux(((remainning_edges >> log2Ceil(AXI_DATA_WIDTH/4)) << log2Ceil(AXI_DATA_WIDTH/4)).asUInt() < remainning_edges,
-    (remainning_edges >> log2Ceil(AXI_DATA_WIDTH/4)).asUInt() + 1.U,
-    (remainning_edges >> log2Ceil(AXI_DATA_WIDTH/4)))
-  arbi.io.in(0).bits.arlen := arlen.asUInt() - 1.U
   arbi.io.in(1).bits.arlen := ((4 * EMBEDDING + 8) / AXI_DATA_WIDTH - 1).asUInt()
-  arbi.io.in(0).bits.arburst := 1.U(2.W)
   arbi.io.in(1).bits.arburst := 1.U(2.W)
-  arbi.io.in(0).bits.arlock := 0.U
   arbi.io.in(1).bits.arlock := 0.U
-  arbi.io.in(0).bits.arsize := log2Ceil(AXI_DATA_WIDTH).U(AXI_SIZE_WIDTH.W)
   arbi.io.in(1).bits.arsize :=  log2Ceil(AXI_DATA_WIDTH).U(AXI_SIZE_WIDTH.W)
-  arbi.io.in(0).bits.arid := Cat(1.U(1.W), num_regfile.io.wcount.asTypeOf(UInt((AXI_ID_WIDTH-1).W)))
   arbi.io.in(1).bits.arid :=  Cat(0.U(1.W), vertex_read_buffer.io.data_count.asTypeOf(UInt((AXI_ID_WIDTH-1).W)))
   vertex_read_buffer.io.rd_en := arbi.io.in(1).ready | upward_status === upward_sm.output_fin
-  edge_read_buffer.io.rd_en := arbi.io.in(0).ready
+  arbi.io.in(0) <> edge_cache.io.out
 
   //front end of down ward
+  //TODO we should ensure regfile is big enough in case the data return slowly
+  val num_regfile = Module(new regFile(32, 32))
   num_regfile.io.writeFlag := arbi.io.in(0).ready & arbi.io.in(0).valid
   num_regfile.io.wptr := num_regfile.io.wcount
-  num_regfile.io.dataIn := remainning_edges
+  num_regfile.io.dataIn := edge_cache.io.read_edge_num
   num_regfile.io.rptr := io.ddr_r.bits.rid(AXI_ID_WIDTH-2, 0)
+  edge_cache.io.free_ptr := num_regfile.io.wcount
 
   //back end of down ward
   object sm extends ChiselEnum {
@@ -454,7 +491,7 @@ class Broadcast(AXI_ADDR_WIDTH : Int = 64, AXI_DATA_WIDTH: Int = 64, AXI_ID_WIDT
   val keep = Wire(Vec(16, Bool()))
   keep.zipWithIndex.map {
     case(k, i) => k := Mux(r_demux_out(0).bits.rid(AXI_ID_WIDTH-1), Mux(status === sm.firstBurst, num_regfile.io.dataOut > i.U, num > i.U),
-      Mux(i.U < 2.U, false.B, (get_edge_count(r_demux_out(0).bits.rdata) + 2.U) > i.U))
+      Mux(i.U < 2.U, false.B, (edge_cache.get_edge_count(r_demux_out(0).bits.rdata) + 2.U) > i.U))
   }
 
   val vertex_out_fifo = Module(new BRAM_fifo(32, 512 + 16, "edge_fifo"))
@@ -483,7 +520,7 @@ class Broadcast(AXI_ADDR_WIDTH : Int = 64, AXI_DATA_WIDTH: Int = 64, AXI_ID_WIDT
   when(io.signal){
     traveled_edges_reg := 0.U
   }.elsewhen(!io.ddr_r.bits.rid(AXI_ID_WIDTH - 1) & io.ddr_r.valid.asBool() & io.ddr_r.ready.asBool()){
-    traveled_edges_reg := traveled_edges_reg + get_edge_count(io.ddr_r.bits.rdata)
+    traveled_edges_reg := traveled_edges_reg + edge_cache.get_edge_count(io.ddr_r.bits.rdata)
   }
 
   when(io.ddr_ar.valid && io.ddr_ar.ready
