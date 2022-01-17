@@ -1,5 +1,6 @@
 package utils
 import chisel3._
+import chisel3.experimental.ChiselEnum
 import chisel3.util._
 import nf_arm_doce._
 
@@ -128,4 +129,54 @@ class axis_broadcaster (AXIS_DATA_WIDTH: Int = 64, NUM : Int, val mname : String
   })
 
   override def desiredName = mname
+}
+
+private object ArbiterCtrl {
+  def apply(request: Seq[Bool]): Seq[Bool] = request.length match {
+    case 0 => Seq()
+    case 1 => Seq(true.B)
+    case _ => true.B +: request.tail.init.scanLeft(request.head)(_ || _).map(!_)
+  }
+}
+
+class AMBA_Arbiter[T <: Data](val gen: T, val n: Int) extends Module {
+  val io = IO(new ArbiterIO(gen, n))
+
+  object sm extends ChiselEnum {
+    val idole = Value(0x0.U)
+    val fire  = Value(0x1.U) // i "load"  -> 000_0011
+  }
+  val status = RegInit(sm.idole)
+  val grant = ArbiterCtrl(io.in.map(_.valid))
+  val grant_reg = RegInit(VecInit(Seq.fill(n)(false.B)))
+
+  io.chosen := (n - 1).asUInt
+  io.out.bits := io.in(n - 1).bits
+  for (i <- n - 2 to 0 by -1) {
+    when(status === sm.idole){
+      when(io.in(i).valid) {
+        io.chosen := i.asUInt
+        io.out.bits := io.in(i).bits
+      }
+    }.elsewhen(status === sm.fire){
+      when(grant_reg(i)) {
+        io.chosen := i.asUInt
+        io.out.bits := io.in(i).bits
+      }
+    }
+  }
+
+  when(io.in.map(_.valid).reduce(_|_) && status === sm.idole){
+    grant_reg := grant.zip(io.in).map{
+      case(g, in) => g & in.valid
+    }
+    status := sm.fire
+  }.elsewhen(io.out.valid && io.out.ready && status === sm.fire) {
+    status := sm.idole
+  }
+  for (((in, i)) <- io.in.zipWithIndex) {
+    in.ready := Mux(status === sm.idole, grant(i) && io.out.ready, grant_reg(i) && io.out.ready)
+  }
+  io.out.valid := Mux(status === sm.idole, !grant.last || io.in.last.valid, !grant_reg.last || io.in.last.valid)
+
 }

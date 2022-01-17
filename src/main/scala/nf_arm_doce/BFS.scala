@@ -439,7 +439,7 @@ class Broadcast(AXI_ADDR_WIDTH : Int = 64, AXI_DATA_WIDTH: Int = 64, AXI_ID_WIDT
   r_demux.io.m_axis.tready := VecInit.tabulate(2)(i => r_demux_out(i).ready).asUInt()
   edge_cache.io.in <> r_demux_out(1)
 
-  val arbi = Module(new Arbiter(new axiar(AXI_ADDR_WIDTH, AXI_ID_WIDTH, AXI_SIZE_WIDTH, 1), 2))
+  val arbi = Module(new AMBA_Arbiter(new axiar(AXI_ADDR_WIDTH, AXI_ID_WIDTH, AXI_SIZE_WIDTH, 1), 2))
   io.ddr_ar <> arbi.io.out
   arbi.io.in(1).bits.araddr :=  io.embedding_base_addr + (vertex_read_buffer.io.dout << log2Ceil(4 * EMBEDDING + 8))
   arbi.io.in(1).valid :=  vertex_read_buffer.is_valid() && vertex_read_buffer.io.dout(31) === 0.U
@@ -583,11 +583,11 @@ class Scatter(AXIS_DATA_WIDTH: Int = 4, SID: Int) extends Module {
   val arbi = Module(new axis_arbitrator(4, 16, 4))
 
   def vid_to_sid(vid: UInt, sid: UInt) : Bool = {
-    vid(31, 20) === sid
+    vid(3, 0) === sid
   }
 
   def vid2bitmap_addr(vid: UInt) : UInt = {
-    vid(19, 0)
+    vid(31, 4)
   }
 
   val filtered_keep = Wire(Vec(16, Bool()))
@@ -706,14 +706,14 @@ class multi_channel_fifo(AXI_DATA_WIDTH: Int = 64, size : Int = 16) extends Modu
     case (s, i) => {
       s := MuxCase(false.B,
         Array.tabulate(16)(
-          x => (steps(x) === (i + 1).U, io.in(x).valid)
+          x => (steps(x) === (i + 1).U, io.in(x).valid & fifos_ready)
         ))
     }
   }
 
   when(sorted_valid.reduce(_|_)){
     counter := indexAdd(counter, MuxCase(0.U, Seq.tabulate(16)(
-      x => (io.in(16 - x - 1).ready && sorted_valid(16 - x - 1), (16 - x).U)
+      x => (sorted_valid(16 - x - 1), (16 - x).U)
     )))
   }.elsewhen(io.flush){
     counter := 0.U
