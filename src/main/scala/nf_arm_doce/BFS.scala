@@ -21,7 +21,7 @@ class WB_engine(AXI_ADDR_WIDTH : Int = 64, AXI_DATA_WIDTH: Int = 64, AXI_ID_WIDT
     val end = Output(Bool())
     val flush = Input(Bool())
   })
-
+  //TODO: use 64 bit URAM instead of 32 bit
   val buffer = Module(new URAM(512 * 1024,32))
 
   def get_addr_addr(block_index: UInt, size : UInt) : UInt = {
@@ -940,6 +940,8 @@ class controller (AXI_ADDR_WIDTH : Int = 64) extends Module{
   //11 --- tier2_base_addr(63, 32)
   //12 --- traveled edges(63, 32)
   //13 --- traveled edges(31, 0)
+  //14 --- clock(31, 0)
+  //15 --- clock(63, 21)
   val controls = Module(new LookupTable(depth = 32, AXI_ADDR_WIDTH = AXI_ADDR_WIDTH))
   val level = RegInit(0.U(32.W))
   object sm extends ChiselEnum {
@@ -949,19 +951,32 @@ class controller (AXI_ADDR_WIDTH : Int = 64) extends Module{
     val end = Value(0x3.U)
     val start = Value(0x4.U)
     val flush_cache = Value(0x5.U)
+    val write_clock = Value(0x6.U)
   }
   val status = RegInit(sm.idole)
   val start = controls.io.data(0)(0)
   val FIN = RegInit(VecInit(Seq.fill(16)(false.B)))
   val new_tep = Cat(controls.io.data(12), controls.io.data(13)) + io.traveled_edges
+  val counterValue = RegInit(0.U(64.W))
 
   controls.config <> io.config
-  controls.io.writeFlag(0) := status === sm.end | status === sm.fin
-  controls.io.wptr(0) := Mux(status === sm.end, 0.U, 12.U)
-  controls.io.dataIn(0) := Mux(status === sm.end, 2.U, new_tep(63, 32))
-  controls.io.writeFlag(1) := status === sm.fin
-  controls.io.wptr(1) := 13.U
-  controls.io.dataIn(1) := new_tep(31, 0)
+  controls.io.writeFlag(0) := status === sm.end | status === sm.fin | status === sm.write_clock
+  controls.io.wptr(0) := Mux1H(Seq(
+    (status === sm.fin) -> 12.U,
+    (status === sm.write_clock) -> 14.U,
+    (status === sm.end) -> 0.U
+  ))
+  controls.io.dataIn(0) := Mux1H(Seq(
+    (status === sm.fin) -> new_tep(63, 32),
+    (status === sm.write_clock) -> counterValue(31, 0),
+    (status === sm.end) -> 2.U
+  ))
+  controls.io.writeFlag(1) := status === sm.fin | status === sm.write_clock
+  controls.io.wptr(1) := Mux(status === sm.fin, 13.U, 15.U)
+  controls.io.dataIn(1) := Mux1H(Seq(
+    (status === sm.fin) -> new_tep(31, 0),
+    (status === sm.write_clock) -> counterValue(63, 32)
+  ))
 
   when(status === sm.idole && start){
     status := sm.start
@@ -976,6 +991,8 @@ class controller (AXI_ADDR_WIDTH : Int = 64) extends Module{
       status := sm.exe
     }
   }.elsewhen(status === sm.flush_cache && io.flush_cache_end){
+    status := sm.write_clock
+  }.elsewhen(status === sm.write_clock){
     status := sm.end
   }.elsewhen(status === sm.end){
     status := sm.idole
@@ -995,6 +1012,12 @@ class controller (AXI_ADDR_WIDTH : Int = 64) extends Module{
     level := level + 1.U
   }.elsewhen(status === sm.idole && start){
     level := 0.U
+  }
+
+  when(status === sm.start) {
+    counterValue := 0.U
+  }.otherwise{
+    counterValue := counterValue + 1.U
   }
 
   io.signal := status === sm.start || status === sm.fin
