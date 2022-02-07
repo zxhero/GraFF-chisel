@@ -130,6 +130,43 @@ class axidata_blackbox(AXI_ADDR_WIDTH : Int = 44, AXI_DATA_WIDTH: Int = 16, AXI_
   val bid = Output(UInt((NUM * AXI_ID_WIDTH).W))
   val bvalid = Output(UInt((NUM * 1).W))
   val bready = Input(UInt((NUM * 1).W))
+
+  def connect_from(d : axidata) = {
+    awaddr := d.aw.bits.awaddr
+    awid := d.aw.bits.awid
+    awlen := d.aw.bits.awlen
+    awsize := d.aw.bits.awsize
+    awburst := d.aw.bits.awburst
+    awlock := d.aw.bits.awlock
+    awvalid := d.aw.valid
+    d.aw.ready := awready
+
+    araddr := d.ar.bits.araddr
+    arid := d.ar.bits.arid
+    arlen := d.ar.bits.arlen
+    arsize := d.ar.bits.arsize
+    arburst := d.ar.bits.arburst
+    arlock := d.ar.bits.arlock
+    arvalid := d.ar.valid
+    d.ar.ready := arready
+
+    wdata := d.w.bits.wdata
+    wstrb := d.w.bits.wstrb
+    wlast := d.w.bits.wlast
+    wvalid := d.w.valid
+    d.w.ready := wready
+
+    d.r.bits.rdata := rdata
+    d.r.bits.rid := rid
+    d.r.bits.rlast := rlast
+    d.r.valid := rvalid
+    rready := d.r.ready
+
+    d.b.bits.bresp := bresp
+    d.b.bits.bid := bid
+    d.b.valid := bvalid
+    bready := d.b.ready
+  }
 }
 
 class axilitedata(AXI_ADDR_WIDTH : Int = 44) extends Bundle {

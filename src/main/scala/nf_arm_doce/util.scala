@@ -22,6 +22,7 @@ class URAM(size : Int = 1024, width : Int = 32) extends BlackBox{
   })
 }
 
+//TODO: use 9bit instead of 1bit 9 * 116509
 class BRAM(size : Int = 1024 * 1024, width : Int = 1, val mname : String) extends BlackBox{
   val io = IO(new Bundle() {
     val addra = Input(UInt(log2Ceil(size).W))
