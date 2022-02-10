@@ -56,6 +56,8 @@ class WB_engine(AXI_ADDR_WIDTH : Int = 64, AXI_DATA_WIDTH: Int = 64, AXI_ID_WIDT
   val wb_block_index = RegInit(0.U(12.W))
   val flush_start = (wb_sm === sm.idole) && io.flush
   val size_b = region_counter(wb_block_index) - 1.U
+  val level_base_addr_reg = RegInit(0.U(64.W))
+  level_base_addr_reg := io.level_base_addr
   when(io.xbar_in.valid && io.xbar_in.ready) {
     region_counter(block_index) := region_counter(block_index) + 1.U
   }.elsewhen(wb_sm === sm.wb_level && aw_buffer.io.full === false.B && w_buffer.io.full === false.B
@@ -118,7 +120,7 @@ class WB_engine(AXI_ADDR_WIDTH : Int = 64, AXI_DATA_WIDTH: Int = 64, AXI_ID_WIDT
   buffer.io.clkb := clock.asBool()
 
   aw_buffer.io.wr_en := wb_sm === sm.wb_level && w_buffer.io.full === false.B
-  aw_buffer.io.din := io.level_base_addr + Cat(wb_block_index, buffer.io.doutb(13 + 32,32)).asUInt()
+  aw_buffer.io.din := level_base_addr_reg + Cat(wb_block_index, buffer.io.doutb(13 + 32,32)).asUInt()
   io.ddr_aw.bits.awaddr := aw_buffer.io.dout
   io.ddr_aw.bits.awlock := 0.U
   io.ddr_aw.bits.awid := aw_buffer.io.data_count
@@ -518,7 +520,7 @@ class Scatter(AXIS_DATA_WIDTH: Int = 4, SID: Int) extends Module {
     val root = Input(UInt(32.W))
   })
 
-  val bitmap = Module(new BRAM(1024 * 1024, 1, "bitmap_0"))
+  val bitmap = Module(new BRAM(116 * 1024, 9, "bitmap_0"))
   val arbi = Module(new axis_arbitrator(4, 16, 4))
 
   def vid_to_sid(vid: UInt, sid: UInt) : Bool = {
@@ -526,7 +528,11 @@ class Scatter(AXIS_DATA_WIDTH: Int = 4, SID: Int) extends Module {
   }
 
   def vid2bitmap_addr(vid: UInt) : UInt = {
-    vid(31, 4)
+    vid(30, 4) / 9.U(27.W)
+  }
+
+  def vid2bitmap_offset(vid: UInt) : UInt = {
+    vid(30, 4) % 9.U
   }
 
   val filtered_keep = Wire(Vec(16, Bool()))
@@ -551,16 +557,26 @@ class Scatter(AXIS_DATA_WIDTH: Int = 4, SID: Int) extends Module {
 
   //read or write bitmap ehnr this is not FIN
   val write_root = io.start && vid_to_sid(io.root, SID.asUInt())
+  val root_reg = Module(new pipeline(UInt(32.W)))
+  root_reg.io.din.valid := write_root
+  root_reg.io.din.bits := io.root
+  root_reg.io.dout.ready := true.B
   val bitmap_arvalid = vertex_in_fifo.is_valid()
   val halt = vertex_out_fifo.io.full === true.B
   val bitmap_wait = Module(new pipeline(UInt(32.W)))
   bitmap_wait.io.din.valid := bitmap_arvalid
   bitmap_wait.io.din.bits := vertex_in_fifo.io.dout
   bitmap_wait.io.dout.ready := !halt
-  val bitmap_write = Module(new pipeline(UInt(32.W)))
-  bitmap_write.io.din.valid := bitmap_wait.io.dout.valid && (bitmap.io.doutb =/= 1.U(1.W) | bitmap_wait.io.dout.bits(31) === 1.U(1.W))
-  bitmap_write.io.din.bits := bitmap_wait.io.dout.bits
-  bitmap_write.io.dout.ready := !halt
+  val bitmap_write_addr = Module(new pipeline(UInt(32.W)))
+  bitmap_write_addr.io.din.valid := bitmap_wait.io.dout.valid &&
+    (bitmap.io.doutb(vid2bitmap_offset(bitmap_wait.io.dout.bits)) =/= 1.U(1.W) | bitmap_wait.io.dout.bits(31) === 1.U(1.W))
+  bitmap_write_addr.io.din.bits := bitmap_wait.io.dout.bits
+  bitmap_write_addr.io.dout.ready := !halt
+  val bitmap_write_data = Module(new pipeline(UInt(9.W)))
+  bitmap_write_data.io.din.valid := (bitmap_wait.io.dout.valid &&
+    (bitmap.io.doutb(vid2bitmap_offset(bitmap_wait.io.dout.bits)) =/= 1.U(1.W) | bitmap_wait.io.dout.bits(31) === 1.U(1.W)))
+  bitmap_write_data.io.din.bits := bitmap.io.doutb | (1.U(9.W) << vid2bitmap_offset(bitmap_wait.io.dout.bits)).asUInt()
+  bitmap_write_data.io.dout.ready := !halt
 
   vertex_in_fifo.io.din := arbi.io.ddr_out.bits.tdata
   vertex_in_fifo.io.wr_en := arbi.io.ddr_out.valid
@@ -569,13 +585,13 @@ class Scatter(AXIS_DATA_WIDTH: Int = 4, SID: Int) extends Module {
   bitmap.io.addrb := vid2bitmap_addr(vertex_in_fifo.io.dout)
   bitmap.io.clkb := clock.asBool()
   vertex_in_fifo.io.rd_en := !halt
-  vertex_out_fifo.io.wr_en := bitmap_write.io.dout.valid
-  vertex_out_fifo.io.din := bitmap_write.io.dout.bits
+  vertex_out_fifo.io.wr_en := bitmap_write_addr.io.dout.valid
+  vertex_out_fifo.io.din := bitmap_write_addr.io.dout.bits
   bitmap.io.ena := true.B
-  bitmap.io.wea := bitmap_write.io.dout.valid & bitmap_write.io.dout.bits(31) === 0.U(1.W) | write_root
+  bitmap.io.wea := bitmap_write_addr.io.dout.valid & bitmap_write_addr.io.dout.bits(31) === 0.U(1.W) | root_reg.io.dout.valid
   bitmap.io.clka := clock.asBool()
-  bitmap.io.dina := 1.U
-  bitmap.io.addra := Mux(write_root, vid2bitmap_addr(io.root), vid2bitmap_addr(bitmap_write.io.dout.bits))
+  bitmap.io.dina := Mux(root_reg.io.dout.valid, (1.U(9.W) << vid2bitmap_offset(root_reg.io.dout.bits)).asUInt(), bitmap_write_data.io.dout.bits)
+  bitmap.io.addra := Mux(root_reg.io.dout.valid, vid2bitmap_addr(root_reg.io.dout.bits), vid2bitmap_addr(bitmap_write_addr.io.dout.bits))
   vertex_out_fifo.io.rd_en := io.ddr_out.ready //| vertex_out_fifo.test_FIN()
   io.ddr_out.valid := vertex_out_fifo.is_valid() & vertex_out_fifo.io.dout(31) === 0.U
   io.ddr_out.bits.tkeep := true.B
