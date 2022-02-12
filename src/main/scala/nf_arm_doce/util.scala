@@ -5,21 +5,49 @@ import chisel3.util._
 import nf_arm_doce._
 
 //URAM and BRAM's read latency is 1 cycle
-class URAM(size : Int = 1024, width : Int = 32) extends BlackBox{
-  val io = IO(new Bundle() {
-    val addra = Input(UInt(log2Ceil(size).W))
-    val clka = Input(Bool())
-    val dina = Input(UInt(width.W))
-    val douta = Output(UInt(width.W))
-    val ena = Input(Bool())
-    val wea = Input(Bool())
-    val addrb = Input(UInt(log2Ceil(size).W))
-    val clkb = Input(Bool())
-    val dinb = Input(UInt(width.W))
-    val doutb = Output(UInt(width.W))
-    val enb = Input(Bool())
-    val web = Input(Bool())
-  })
+class URAMIO(size : Int, width : Int) extends Bundle{
+  val addra = Input(UInt(log2Ceil(size).W))
+  val clka = Input(Bool())
+  val dina = Input(UInt(width.W))
+  val douta = Output(UInt(width.W))
+  val ena = Input(Bool())
+  val wea = Input(Bool())
+  val addrb = Input(UInt(log2Ceil(size).W))
+  val clkb = Input(Bool())
+  val dinb = Input(UInt(width.W))
+  val doutb = Output(UInt(width.W))
+  val enb = Input(Bool())
+  val web = Input(Bool())
+}
+class URAM(size : Int, width : Int) extends BlackBox{
+  val io = IO(new URAMIO(size, width))
+}
+
+class URAM_cluster(size : Int, width : Int) extends Module{
+  val io = IO(new URAMIO(size, width))
+  val cluster = Seq.fill(size / 4096)(Module(new URAM(4096, width)))
+  val doutb = Wire(Vec(size / 4086, UInt(width.W)))
+  val douta = Wire(Vec(size / 4086, UInt(width.W)))
+
+  cluster.zipWithIndex.map{
+    case (u, i) => {
+      u.io.clkb := io.clkb
+      u.io.clka := io.clka
+      u.io.enb := io.enb
+      u.io.ena := io.ena
+      u.io.dinb := io.dinb
+      u.io.dina := io.dina
+      u.io.addrb := io.addrb(11, 0)
+      u.io.addra := io.addra(11, 0)
+      u.io.web := io.web && (i.asUInt() === (io.addrb >> 12.U).asUInt())
+      u.io.wea := io.wea && (i.asUInt() === (io.addra >> 12.U).asUInt())
+      doutb(i) := Mux((i.asUInt() === (io.addrb >> 12.U).asUInt()), u.io.doutb, 0.U(width.W))
+      douta(i) := Mux((i.asUInt() === (io.addra >> 12.U).asUInt()), u.io.douta, 0.U(width.W))
+    }
+  }
+
+  io.doutb := doutb.reduce(_|_)
+  io.douta := douta.reduce(_|_)
 }
 
 //TODO: use 9bit instead of 1bit 9 * 116509
