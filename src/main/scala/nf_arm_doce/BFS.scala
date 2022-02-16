@@ -41,6 +41,8 @@ class WB_engine(AXI_ADDR_WIDTH : Int = 64, AXI_DATA_WIDTH: Int = 64, AXI_ID_WIDT
   val region_counter_addrb_0 = block_index
 
   //update buffer and region counter
+  val region_counter_doutb_forward = Module(new pipeline(UInt(9.W)))
+  val region_counter_doutb = Wire(UInt(9.W))
   val pipeline_1 = Module(new pipeline(new Bundle() {
     val addr = UInt(16.W)
     val block_index = UInt(12.W)
@@ -52,13 +54,18 @@ class WB_engine(AXI_ADDR_WIDTH : Int = 64, AXI_DATA_WIDTH: Int = 64, AXI_ID_WIDT
 
   buffer.io.ena := true.B
   buffer.io.wea := pipeline_1.io.dout.valid && pipeline_1.io.dout.ready
-  buffer.io.addra := get_level_addr(pipeline_1.io.dout.bits.block_index, region_counter.io.doutb)
+  buffer.io.addra := get_level_addr(pipeline_1.io.dout.bits.block_index, region_counter_doutb)
   buffer.io.dina := Cat(pipeline_1.io.dout.bits.addr, level)
   buffer.io.clka := clock.asBool()
 
   val region_counter_addra_0 = pipeline_1.io.dout.bits.block_index
   val region_counter_wea_0 = pipeline_1.io.dout.valid && pipeline_1.io.dout.ready
-  val region_counter_dina_0 = region_counter.io.doutb + 1.U
+  val region_counter_dina_0 = region_counter_doutb + 1.U
+
+  region_counter_doutb_forward.io.din.valid := io.xbar_in.valid && io.xbar_in.ready &&
+    region_counter_addra_0 === region_counter_addrb_0 && region_counter_wea_0
+  region_counter_doutb_forward.io.din.bits := region_counter_dina_0
+  region_counter_doutb := Mux(region_counter_doutb_forward.io.dout.valid, region_counter_doutb_forward.io.dout.bits, region_counter.io.doutb)
 
   //write back buffer
   object sm extends ChiselEnum {
@@ -75,14 +82,15 @@ class WB_engine(AXI_ADDR_WIDTH : Int = 64, AXI_DATA_WIDTH: Int = 64, AXI_ID_WIDT
   val flush_start = (wb_sm === sm.idole) && io.flush
   val size_b = RegInit(0.U(8.W))
   val level_base_addr_reg = RegInit(0.U(64.W))
-  val wb_start = pipeline_1.io.dout.valid && region_counter.io.doutb === 63.U
+  val wb_start = pipeline_1.io.dout.valid && region_counter_doutb === 63.U
   pipeline_1.io.dout.ready := wb_sm === sm.idole
+  region_counter_doutb_forward.io.dout.ready := wb_sm === sm.idole
   level_base_addr_reg := io.level_base_addr
 
   when(wb_start){
     size_b := 64.U
   }.elsewhen(wb_sm === sm.check_size){
-    size_b := region_counter.io.doutb
+    size_b := region_counter_doutb
   }
 
   when(wb_start){
@@ -97,7 +105,7 @@ class WB_engine(AXI_ADDR_WIDTH : Int = 64, AXI_DATA_WIDTH: Int = 64, AXI_ID_WIDT
   when(flush_start){
     wb_sm := sm.check_size
   }.elsewhen(wb_sm === sm.check_size){
-    when(region_counter.io.doutb === 0.U){
+    when(region_counter_doutb === 0.U){
       wb_sm := sm.wb_1block
     }.otherwise{
       wb_sm := sm.wb_level
@@ -597,19 +605,26 @@ class Scatter(AXIS_DATA_WIDTH: Int = 4, SID: Int) extends Module {
   bitmap_wait.io.din.valid := bitmap_arvalid
   bitmap_wait.io.din.bits := vertex_in_fifo.io.dout
   bitmap_wait.io.dout.ready := !halt
+  val bitmap_doutb = Wire(UInt(9.W))
   val bitmap_write_addr = Module(new pipeline(UInt(32.W)))
   bitmap_write_addr.io.din.valid := bitmap_wait.io.dout.valid &&
-    (bitmap.io.doutb(vid2bitmap_offset(bitmap_wait.io.dout.bits)) =/= 1.U(1.W) | bitmap_wait.io.dout.bits(31) === 1.U(1.W))
+    (bitmap_doutb(vid2bitmap_offset(bitmap_wait.io.dout.bits)) =/= 1.U(1.W) | bitmap_wait.io.dout.bits(31) === 1.U(1.W))
   bitmap_write_addr.io.din.bits := bitmap_wait.io.dout.bits
   bitmap_write_addr.io.dout.ready := !halt
   val bitmap_write_data = Module(new pipeline(UInt(9.W)))
   bitmap_write_data.io.din.valid := (bitmap_wait.io.dout.valid &&
-    (bitmap.io.doutb(vid2bitmap_offset(bitmap_wait.io.dout.bits)) =/= 1.U(1.W) | bitmap_wait.io.dout.bits(31) === 1.U(1.W)))
-  bitmap_write_data.io.din.bits := Mux(vid2bitmap_addr(bitmap_wait.io.dout.bits) =/= vid2bitmap_addr(bitmap_write_addr.io.dout.bits),
-    bitmap.io.doutb | (1.U(9.W) << vid2bitmap_offset(bitmap_wait.io.dout.bits)).asUInt(),
-    bitmap_write_data.io.dout.bits | (1.U(9.W) << vid2bitmap_offset(bitmap_wait.io.dout.bits)).asUInt()
-  )
+    (bitmap_doutb(vid2bitmap_offset(bitmap_wait.io.dout.bits)) =/= 1.U(1.W) | bitmap_wait.io.dout.bits(31) === 1.U(1.W)))
+  bitmap_write_data.io.din.bits := bitmap_doutb | (1.U(9.W) << vid2bitmap_offset(bitmap_wait.io.dout.bits)).asUInt()
   bitmap_write_data.io.dout.ready := !halt
+  val bitmap_write_data_forward = Module(new pipeline(UInt(9.W)))
+  bitmap_write_data_forward.io.din.valid := bitmap_write_addr.io.dout.valid && bitmap_arvalid &&
+    (vid2bitmap_addr(vertex_in_fifo.io.dout) === vid2bitmap_addr(bitmap_write_addr.io.dout.bits))
+  bitmap_write_data_forward.io.din.bits := bitmap_write_data.io.dout.bits
+  bitmap_write_data_forward.io.dout.ready := !halt
+  bitmap_doutb := MuxCase(bitmap.io.doutb, Array(
+    (vid2bitmap_addr(bitmap_wait.io.dout.bits) === vid2bitmap_addr(bitmap_write_addr.io.dout.bits)) -> bitmap_write_data.io.dout.bits,
+    bitmap_write_data_forward.io.dout.valid -> bitmap_write_data_forward.io.dout.bits
+  ))
 
   vertex_in_fifo.io.din := arbi.io.ddr_out.bits.tdata
   vertex_in_fifo.io.wr_en := arbi.io.ddr_out.valid
@@ -666,8 +681,6 @@ class multi_channel_fifo(AXI_DATA_WIDTH: Int = 64, size : Int = 16) extends Modu
   val fifos_ready = Seq.tabulate(16)(i => collector_fifos(i).io.full === false.B).reduce(_&_)
   val counter = RegInit(0.U(log2Ceil(16).W))
   val collector_data = Wire(Vec(16, UInt(32.W)))
-  val sorted_data = Wire(Vec(16, UInt(32.W)))
-  val sorted_valid = Wire(Vec(16, Bool()))
   val in_pipeline = Seq.fill(16)(
     Module(new pipeline((new axisdata(4, 4))))
   )
@@ -690,35 +703,20 @@ class multi_channel_fifo(AXI_DATA_WIDTH: Int = 64, size : Int = 16) extends Modu
     Mux(index1 <= index2, index2 - index1, 16.U - index1 + index2)
   }
 
-  sorted_data.zipWithIndex.map{
-    case (s, i) => {
-      s := MuxCase(0.U,
-        Array.tabulate(16)(
-          x => (steps(x) === (i + 1).U, in_pipeline(x).io.dout.bits.tdata)
-        ))
-    }
-  }
-  sorted_valid.zipWithIndex.map{
-    case (s, i) => {
-      s := MuxCase(false.B,
-        Array.tabulate(16)(
-          x => (steps(x) === (i + 1).U, in_pipeline(x).io.dout.valid & fifos_ready)
-        ))
-    }
-  }
-
-  when(sorted_valid.reduce(_|_)){
-    counter := indexAdd(counter, MuxCase(0.U, Seq.tabulate(16)(
-      x => (sorted_valid(16 - x - 1), (16 - x).U)
-    )))
+  when(steps(15) =/= 0.U){
+    counter := indexAdd(counter, steps(15))
   }.elsewhen(io.flush){
     counter := 0.U
   }
 
   collector_fifos.zipWithIndex.map{
     case (f, i) => {
-      val fifo_in_data = Mux1H(Seq.tabulate(16)(x => (indexSub(counter, i.U) === x.U, sorted_data(x))))
-      val fifo_in_valid = Mux1H(Seq.tabulate(16)(x => (indexSub(counter, i.U) === x.U, sorted_valid(x))))
+      val fifo_in_data = MuxCase(0.U, Seq.tabulate(16)(
+        x => ((indexSub(counter, i.U) + 1.U) === steps(x)) -> in_pipeline(x).io.dout.bits.tdata)
+      )
+      val fifo_in_valid = MuxCase(0.U, Seq.tabulate(16)(
+        x => ((indexSub(counter, i.U) + 1.U) === steps(x)) -> in_pipeline(x).io.dout.valid)
+      )
       f.io.din := Mux(io.out.wr_en, io.out.din(32 * (i + 1) - 1, 32 * i), fifo_in_data)
       f.io.wr_en := Mux(io.out.wr_en, io.out.wr_en ,fifo_in_valid)
       collector_data(i) := f.io.dout
