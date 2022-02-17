@@ -445,8 +445,8 @@ class Broadcast(AXI_ADDR_WIDTH : Int = 64, AXI_DATA_WIDTH: Int = 64, AXI_ID_WIDT
   //back end of down ward
   object sm extends ChiselEnum {
     //val idole = Value(0x0.U)
-    val firstBurst  = Value(0x1.U) // i "load"  -> 000_0011
-    val remainingBurst   = Value(0x2.U) // i "imm"   -> 001_0011
+    val firstBurst  = Value(0x0.U) // i "load"  -> 000_0011
+    val remainingBurst   = Value(0x1.U) // i "imm"   -> 001_0011
   }
   val status = RegInit(sm.firstBurst)
   val num = RegInit(0.U(32.W))
@@ -622,7 +622,8 @@ class Scatter(AXIS_DATA_WIDTH: Int = 4, SID: Int) extends Module {
   bitmap_write_data_forward.io.din.bits := bitmap_write_data.io.dout.bits
   bitmap_write_data_forward.io.dout.ready := !halt
   bitmap_doutb := MuxCase(bitmap.io.doutb, Array(
-    (vid2bitmap_addr(bitmap_wait.io.dout.bits) === vid2bitmap_addr(bitmap_write_addr.io.dout.bits)) -> bitmap_write_data.io.dout.bits,
+    (bitmap_write_addr.io.dout.valid && bitmap_wait.io.dout.valid &&
+      vid2bitmap_addr(bitmap_wait.io.dout.bits) === vid2bitmap_addr(bitmap_write_addr.io.dout.bits)) -> bitmap_write_data.io.dout.bits,
     bitmap_write_data_forward.io.dout.valid -> bitmap_write_data_forward.io.dout.bits
   ))
 
@@ -692,7 +693,7 @@ class multi_channel_fifo(AXI_DATA_WIDTH: Int = 64, size : Int = 16) extends Modu
   }
   val steps = (Seq.tabulate(16)(
     i => {
-      Seq.tabulate(i + 1)(x => in_pipeline(x).io.dout.valid.asTypeOf(UInt(4.W))).reduce(_+_)
+      Seq.tabulate(i + 1)(x => (in_pipeline(x).io.dout.valid && fifos_ready).asTypeOf(UInt(4.W))).reduce(_+_)
     }
   ))
 
@@ -759,15 +760,15 @@ class multi_port_mc(AXI_ADDR_WIDTH : Int = 64, AXI_DATA_WIDTH: Int = 64, AXI_ID_
     val idole = Value(0x0.U)
     val next_tier_is_0  = Value(0x1.U) // i "load"  -> 000_0011
     val next_tier_is_1   = Value(0x2.U) // i "imm"   -> 001_0011
-    val writeback = Value(0x5.U)
-    val readback = Value(0x6.U)
+    val writeback = Value(0x3.U)
+    val readback = Value(0x4.U)
     //val start = Value(0x7.U)
-    val sync_send_0 = Value(0x8.U)
-    val sync_send_1 = Value(0x9.U)
-    val signal_wait_0 = Value(0x10.U)
-    val signal_wait_1 = Value(0x11.U)
-    val writebackdata = Value(0x12.U)
-    val readbackdata = Value(0x13.U)
+    val sync_send_0 = Value(0x5.U)
+    val sync_send_1 = Value(0x6.U)
+    val signal_wait_0 = Value(0x7.U)
+    val signal_wait_1 = Value(0x8.U)
+    val writebackdata = Value(0x9.U)
+    val readbackdata = Value(0x10.U)
   }
   val status = RegInit(sm.idole)
 
