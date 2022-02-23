@@ -77,7 +77,7 @@ class WB_engine(AXI_ADDR_WIDTH : Int = 64, AXI_DATA_WIDTH: Int = 64, AXI_ID_WIDT
   val wb_sm = RegInit(sm.idole)
   val count = RegInit(0.U(8.W))
   val aw_buffer = Module(new BRAM_fifo(32, AXI_ADDR_WIDTH, "addr_fifo"))
-  val w_buffer = Module(new BRAM_fifo(32, 32, "vid_fifo"))
+  val w_buffer = Module(new BRAM_fifo(32, 64, "level_fifo"))
   val wb_block_index = RegInit(0.U(12.W))
   val flush_start = (wb_sm === sm.idole) && io.flush
   val size_b = RegInit(0.U(8.W))
@@ -158,7 +158,8 @@ class WB_engine(AXI_ADDR_WIDTH : Int = 64, AXI_DATA_WIDTH: Int = 64, AXI_ID_WIDT
   aw_buffer.io.srst := reset.asBool()
   aw_buffer.io.wr_en := wb_sm === sm.wb_level && w_buffer.io.full === false.B
   aw_buffer.io.din := level_base_addr_reg + Cat(wb_block_index, buffer.io.doutb(13 + 32,32)).asUInt()
-  io.ddr_aw.bits.awaddr := aw_buffer.io.dout
+  val alignment_addr = aw_buffer.io.dout(63, 6)
+  io.ddr_aw.bits.awaddr := Cat(alignment_addr, 0.U(6.W))
   io.ddr_aw.bits.awlock := 0.U
   io.ddr_aw.bits.awid := aw_buffer.io.data_count
   io.ddr_aw.bits.awlen := 0.U
@@ -170,11 +171,12 @@ class WB_engine(AXI_ADDR_WIDTH : Int = 64, AXI_DATA_WIDTH: Int = 64, AXI_ID_WIDT
   w_buffer.io.clk := clock.asBool()
   w_buffer.io.srst := reset.asBool()
   w_buffer.io.wr_en := wb_sm === sm.wb_level && aw_buffer.io.full === false.B
-  w_buffer.io.din := buffer.io.doutb(31, 0)
-  io.ddr_w.bits.wdata := w_buffer.io.dout
+  w_buffer.io.din := buffer.io.doutb(31 + 6, 0)
+  val alignment_offset = w_buffer.io.dout(5 + 32, 32)
+  io.ddr_w.bits.wdata := w_buffer.io.dout(31, 0).asTypeOf(UInt(512.W)) << (8.U * alignment_offset)
   io.ddr_w.bits.wlast := true.B
   io.ddr_w.valid := w_buffer.is_valid()
-  io.ddr_w.bits.wstrb := 0xf.U
+  io.ddr_w.bits.wstrb := 0xf.U(64.W) << alignment_offset
   w_buffer.io.rd_en := io.ddr_w.ready
 
   io.ddr_b.ready := true.B
@@ -354,7 +356,9 @@ class readEdge_engine(AXI_ADDR_WIDTH : Int = 64, AXI_DATA_WIDTH: Int = 64, AXI_I
   io.out.bits.arlen := arlen.asUInt()
   io.out.bits.arburst := 1.U(2.W)
   io.out.bits.arlock := 0.U
-  io.out.bits.arsize := log2Ceil(AXI_DATA_WIDTH).U(AXI_SIZE_WIDTH.W)
+  io.out.bits.arsize := MuxCase(log2Ceil(AXI_DATA_WIDTH).U(AXI_SIZE_WIDTH.W), Seq.tabulate(log2Ceil(AXI_DATA_WIDTH/4))(
+    x => ((num_vertex <= Seq.tabulate(log2Ceil(AXI_DATA_WIDTH/4))(i => 1 << i)(x).asUInt()) -> (x + 2).asUInt())
+  ))
   io.out.bits.arid := Cat(1.U(1.W), io.free_ptr)
   edge_read_buffer.io.rd_en := io.out.ready & cache_status === cache_sm.idole
   io.read_edge_num := num_vertex
@@ -842,7 +846,7 @@ class multi_port_mc(AXI_ADDR_WIDTH : Int = 64, AXI_DATA_WIDTH: Int = 64, AXI_ID_
         s := sm.readbackdata
       }.elsewhen(s === sm.readbackdata && axi.r.bits.rlast.asBool() && axi.r.ready && axi.r.valid){
         s := sm.idole
-      }.elsewhen(s === sm.writebackdata && axi.w.bits.wlast.asBool()){
+      }.elsewhen(s === sm.writebackdata && axi.w.bits.wlast.asBool() && axi.w.ready.asBool()){
         s := sm.idole
       }
     }
