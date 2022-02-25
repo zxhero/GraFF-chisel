@@ -23,6 +23,15 @@ class axiar(AXI_ADDR_WIDTH : Int = 44, AXI_ID_WIDTH: Int = 18, AXI_SIZE_WIDTH: I
   val arsize = (UInt((NUM * AXI_SIZE_WIDTH).W))
   val arburst = (UInt((NUM * 2).W))
   val arlock = (UInt((NUM * 1).W))
+
+  def tie_off() = {
+    araddr := 0.U
+    arid := 0.U
+    arlen := 0.U
+    arsize := 0.U
+    arburst := 0.U
+    arlock := 0.U
+  }
 }
 
 class axiaw(AXI_ADDR_WIDTH : Int = 44, AXI_ID_WIDTH: Int = 18, AXI_SIZE_WIDTH: Int = 3, NUM : Int = 1) extends Bundle {
@@ -32,12 +41,27 @@ class axiaw(AXI_ADDR_WIDTH : Int = 44, AXI_ID_WIDTH: Int = 18, AXI_SIZE_WIDTH: I
   val awsize = (UInt((NUM * AXI_SIZE_WIDTH).W))
   val awburst = (UInt((NUM * 2).W))
   val awlock = (UInt((NUM * 1).W))
+
+  def tie_off() = {
+    awaddr := 0.U
+    awid := 0.U
+    awlen := 0.U
+    awsize := 0.U
+    awburst := 0.U
+    awlock := 0.U
+  }
 }
 
 class axiw(AXI_DATA_WIDTH: Int = 16, NUM : Int = 1) extends Bundle {
   val wdata = (UInt((NUM*8*AXI_DATA_WIDTH).W))
   val wstrb = (UInt((NUM*AXI_DATA_WIDTH).W))
   val wlast = (UInt((NUM * 1).W))
+
+  def tie_off() = {
+    wdata := 0.U
+    wstrb := 0.U
+    wlast := 0.U
+  }
 }
 
 class axib(AXI_ID_WIDTH: Int = 18, NUM : Int = 1) extends Bundle {
