@@ -119,6 +119,10 @@ class BRAM_fifo(val size : Int, val width : Int, val mname : String) extends Bla
   def is_valid() : Bool = {
     io.valid
   }
+
+  def is_ready() : Bool = {
+    io.full === false.B
+  }
 }
 
 class xbar(AXI_ADDR_WIDTH : Int = 64, AXI_DATA_WIDTH: Int = 8, AXI_ID_WIDTH: Int = 1, AXI_SIZE_WIDTH: Int = 3) extends BlackBox {
@@ -154,6 +158,30 @@ class axis_broadcaster (AXIS_DATA_WIDTH: Int = 64, NUM : Int, val mname : String
     val aresetn = Input(Bool())
     val s_axis = new streamdata_id_blackbox(AXIS_DATA_WIDTH, 1, 1, AXIS_ID_WIDTH)
     val m_axis = Flipped(new streamdata_id_blackbox(AXIS_DATA_WIDTH, 1, NUM, AXIS_ID_WIDTH))
+
+  })
+
+  override def desiredName = mname
+}
+
+class axis_combiner (AXIS_DATA_WIDTH: Int, NUM : Int, val mname : String, AXIS_ID_WIDTH: Int = 1) extends BlackBox{
+  val io = IO(new Bundle() {
+    val aclk = Input(Bool())
+    val aresetn = Input(Bool())
+    val s_axis = new streamdata_id_blackbox(AXIS_DATA_WIDTH, 1, NUM, AXIS_ID_WIDTH)
+    val m_axis = Flipped(new streamdata_id_blackbox(AXIS_DATA_WIDTH * NUM, 1, 1, AXIS_ID_WIDTH))
+
+  })
+
+  override def desiredName = mname
+}
+
+class axis_data_fifo (AXIS_DATA_WIDTH: Int, val mname : String, AXIS_ID_WIDTH: Int = 1) extends BlackBox{
+  val io = IO(new Bundle() {
+    val s_axis_aclk = Input(Bool())
+    val s_axis_aresetn = Input(Bool())
+    val s_axis = new streamdata_id_blackbox(AXIS_DATA_WIDTH, 1, 1, AXIS_ID_WIDTH)
+    val m_axis = Flipped(new streamdata_id_blackbox(AXIS_DATA_WIDTH, 1, 1, AXIS_ID_WIDTH))
 
   })
 

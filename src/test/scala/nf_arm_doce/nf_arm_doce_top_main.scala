@@ -25,42 +25,39 @@ class BFS_ps(AXI_ADDR_WIDTH : Int = 64, AXI_DATA_WIDTH: Int = 64, AXI_ID_WIDTH: 
   val io = IO(new Bundle() {
     val config = new axilitedata(AXI_ADDR_WIDTH)
     val PLmemory = Vec(2, Flipped(new axidata(AXI_ADDR_WIDTH, AXI_DATA_WIDTH, AXI_ID_WIDTH, AXI_SIZE_WIDTH)))
-    val PSmempory = Flipped(new axidata(AXI_ADDR_WIDTH, 16, AXI_ID_WIDTH, AXI_SIZE_WIDTH))
+    val PSmemory = Vec(4, Flipped(new axidata(AXI_ADDR_WIDTH, 16, AXI_ID_WIDTH, AXI_SIZE_WIDTH)))
   })
 
-  val controls = Module(new controller(AXI_ADDR_WIDTH, 4))
+  val controls = Module(new controller(AXI_ADDR_WIDTH, 16))
 
-
-  val pl_mc = Module(new multi_port_mc(AXI_ADDR_WIDTH, AXI_DATA_WIDTH, AXI_ID_WIDTH, AXI_SIZE_WIDTH, 4))
-  val Scatters = Seq.tabulate(4)(
-    i => Module(new Scatter(4, i, 16))
+  val pl_mc = Module(new multi_port_mc(AXI_ADDR_WIDTH, AXI_DATA_WIDTH, AXI_ID_WIDTH, AXI_SIZE_WIDTH, 16))
+  val Scatters = Seq.tabulate(16)(
+    i => Module(new Scatter(4, i, AXI_DATA_WIDTH))
   )
-  val Gathers = Module(new Gather())
+  val Gathers = Module(new Gather(64, 4))
   val Applys = Module(new Apply())
-  val Broadcasts = Module(new Broadcast(64, 16, 6, 3, 14))
-  val bxbar = Module(new broadcast_xbar(16, 4, 1))
+  val Broadcasts = Seq.tabulate(4)(
+    i => Module(new Broadcast(64, 16, 6, 3,
+      14, 4, i))
+  )
+  val bxbar = Module(new broadcast_xbar(16, 16, 4))
 
   io.PLmemory <> pl_mc.io.ddr_out
-  Applys.io.gather_in <> Gathers.io.gather_out(0)
-  Broadcasts.io.gather_in <> Gathers.io.gather_out(1)
   Gathers.io.ddr_in <> pl_mc.io.cacheable_out
-  bxbar.io.ddr_in(0) <> Broadcasts.io.xbar_out
-
-  Broadcasts.io.ddr_r <> io.PSmempory.r
-  Broadcasts.io.ddr_ar <> io.PSmempory.ar
+  Applys.io.gather_in <> Gathers.io.gather_out(4)
   Applys.io.ddr_w <> pl_mc.io.non_cacheable_in.w
   Applys.io.ddr_aw <> pl_mc.io.non_cacheable_in.aw
   Applys.io.ddr_b <> pl_mc.io.non_cacheable_in.b
-  //tie off unnecessary ports
-  io.PSmempory.b.ready := false.B
-  io.PSmempory.aw.bits.tie_off()
-  io.PSmempory.aw.valid := false.B
-  io.PSmempory.w.bits.tie_off()
-  io.PSmempory.w.valid := false.B
-  pl_mc.io.non_cacheable_in.r.ready := false.B
-  pl_mc.io.non_cacheable_in.ar.bits.tie_off()
-  pl_mc.io.non_cacheable_in.ar.valid := false.B
-
+  val inflight_vtxs = Broadcasts.map{i => i.io.inflight_vtxs_local}.reduce(_+_)
+  Broadcasts.zipWithIndex.map{
+    case (b, i) => {
+      b.io.gather_in <> Gathers.io.gather_out(i)
+      b.io.ddr_r <> io.PSmemory(i).r
+      b.io.ddr_ar <> io.PSmemory(i).ar
+      bxbar.io.ddr_in(i) <> b.io.xbar_out
+      b.io.inflight_vtxs_total := inflight_vtxs
+    }
+  }
   Scatters.zipWithIndex.map{
     case (pe, i) => {
       pe.io.xbar_in <> bxbar.io.pe_out(i)
@@ -69,20 +66,42 @@ class BFS_ps(AXI_ADDR_WIDTH : Int = 64, AXI_DATA_WIDTH: Int = 64, AXI_ID_WIDTH: 
     }
   }
 
+  //tie off unnecessary ports
+  io.PSmemory.map{
+    i => {
+      i.b.ready := false.B
+      i.aw.bits.tie_off()
+      i.aw.valid := false.B
+      i.w.bits.tie_off()
+      i.w.valid := false.B
+    }
+  }
+  pl_mc.io.non_cacheable_in.r.ready := false.B
+  pl_mc.io.non_cacheable_in.ar.bits.tie_off()
+  pl_mc.io.non_cacheable_in.ar.valid := false.B
+
   //control path
   controls.io.config <> io.config
-  controls.io.traveled_edges := Broadcasts.io.traveled_edges
+  controls.io.traveled_edges := Broadcasts.map{i => i.io.traveled_edges}.reduce(_+_)
   controls.io.unvisited_size := pl_mc.io.unvisited_size
   controls.io.flush_cache_end := Applys.io.end
-  Applys.io.flush := controls.io.flush_cache
   Gathers.io.signal := controls.io.signal
-  Broadcasts.io.signal := controls.io.signal
-  Broadcasts.io.root := controls.io.data(7)
-  Broadcasts.io.start := controls.io.start
-  Broadcasts.io.embedding_base_addr := Cat(controls.io.data(2), controls.io.data(1))
-  Broadcasts.io.edge_base_addr := Cat(controls.io.data(4), controls.io.data(3))
+  Applys.io.flush := controls.io.flush_cache
   Applys.io.level_base_addr := Cat(controls.io.data(6), controls.io.data(5))
   Applys.io.level := controls.io.level
+  Broadcasts.zipWithIndex.map{
+    case(b, i) => {
+      b.io.root := controls.io.data(7)
+      b.io.signal := controls.io.signal
+      b.io.embedding_base_addr := Cat(controls.io.data(2), controls.io.data(1))
+      b.io.edge_base_addr := Cat(controls.io.data(4), controls.io.data(3))
+      if(i == 0){
+        b.io.start := controls.io.start
+      }else{
+        b.io.start := false.B
+      }
+    }
+  }
   pl_mc.io.tiers_base_addr(0) := Cat(controls.io.data(9), controls.io.data(8))
   pl_mc.io.tiers_base_addr(1) := Cat(controls.io.data(11), controls.io.data(10))
   pl_mc.io.signal := controls.io.signal

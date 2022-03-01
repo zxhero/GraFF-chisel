@@ -263,34 +263,81 @@ class axis_arbitrator(AXIS_DATA_WIDTH: Int = 4, NUM : Int = 16, ELEMENT_WIDTH: I
   }
 }
 
-class Gather(AXI_DATA_WIDTH: Int = 64) extends Module{
+class Gather(AXI_DATA_WIDTH: Int = 64, Broadcast_Num: Int) extends Module{
   val io = IO(new Bundle() {
     val ddr_in = Flipped(Decoupled(new axisdata(AXI_DATA_WIDTH, 4)))
-    val gather_out = Vec(2, Decoupled(new axisdata(4, 4)))
+    val gather_out = Vec(1 + Broadcast_Num, Decoupled(new axisdata(4, 4)))
 
     //control path
     val signal = Input(Bool())
   })
-  val Selector = Module(new axis_arbitrator(4, 16, 4))
-  Selector.io.xbar_in <> io.ddr_in
-
-  val broadcaster = Module(new axis_broadcaster(4, 2, "gather_broadcaster"))
-  broadcaster.io.s_axis.connectfrom(Selector.io.ddr_out.bits)
-  broadcaster.io.s_axis.tvalid := Selector.io.ddr_out.valid
-  Selector.io.ddr_out.ready := broadcaster.io.s_axis.tready
+  val broadcaster = Module(new axis_broadcaster(AXI_DATA_WIDTH, (1 + Broadcast_Num), "gather_broadcaster"))
+  broadcaster.io.s_axis.connectfrom(io.ddr_in.bits)
+  broadcaster.io.s_axis.tvalid := io.ddr_in.valid
+  io.ddr_in.ready := broadcaster.io.s_axis.tready
   broadcaster.io.aresetn := ~reset.asBool()
   broadcaster.io.aclk := clock.asBool()
-  io.gather_out.zipWithIndex.map{
-    case (gather, i) => {
-      broadcaster.io.m_axis.connectto(gather.bits, i)
-      gather.valid := broadcaster.io.m_axis.tvalid(i)
+
+  val v2Apply_fifo = Module(new axis_data_fifo(AXI_DATA_WIDTH, "v2A_fifo"))
+  v2Apply_fifo.io.s_axis_aclk := clock.asBool()
+  v2Apply_fifo.io.s_axis_aresetn := ~reset.asBool()
+  v2Apply_fifo.io.s_axis.tdata := broadcaster.io.m_axis.tdata(AXI_DATA_WIDTH * 8 * (Broadcast_Num + 1) - 1, AXI_DATA_WIDTH * 8 * Broadcast_Num)
+  v2Apply_fifo.io.s_axis.tvalid := broadcaster.io.m_axis.tvalid(Broadcast_Num)
+  v2Apply_fifo.io.s_axis.tkeep := broadcaster.io.m_axis.tkeep(AXI_DATA_WIDTH * (Broadcast_Num + 1) - 1, AXI_DATA_WIDTH * Broadcast_Num)
+  v2Apply_fifo.io.s_axis.tlast := broadcaster.io.m_axis.tlast(Broadcast_Num)
+
+  val v2Broadcast_fifo = Seq.tabulate(Broadcast_Num)(
+    i => Module(new axis_data_fifo(AXI_DATA_WIDTH / Broadcast_Num, "v2B_fifo"))
+  )
+  v2Broadcast_fifo.zipWithIndex.map{
+    case (b, i) => {
+      b.io.s_axis_aresetn := ~reset.asBool()
+      b.io.s_axis_aclk := clock.asBool()
+      b.io.s_axis.tdata := VecInit(broadcaster.io.m_axis.tdata(AXI_DATA_WIDTH * 8 * (i + 1) - 1, AXI_DATA_WIDTH * 8 * i).
+        asTypeOf(Vec(Broadcast_Num, UInt((AXI_DATA_WIDTH * 8 / Broadcast_Num).W))).map{
+        x => x((AXI_DATA_WIDTH * 8 / Broadcast_Num) / Broadcast_Num * (i + 1) - 1, (AXI_DATA_WIDTH * 8 / Broadcast_Num) / Broadcast_Num * i)
+      }).asUInt()
+      b.io.s_axis.tvalid := broadcaster.io.m_axis.tvalid(i) && (broadcaster.io.m_axis.tkeep(AXI_DATA_WIDTH / 4 - 1, 0).
+        asTypeOf(Vec(AXI_DATA_WIDTH / 4, Bool())).zipWithIndex.map{
+        case(k, x) => {
+          if((x % Broadcast_Num) == i){
+            k
+          }else{
+            false.B
+          }
+        }
+      }.reduce(_|_))
+      b.io.s_axis.tkeep := VecInit(broadcaster.io.m_axis.tkeep(AXI_DATA_WIDTH / 4 - 1, 0).asTypeOf(Vec(Broadcast_Num, UInt((AXI_DATA_WIDTH / 4 / Broadcast_Num).W))).map{
+        x => x(i)
+      }).asUInt()
+      b.io.s_axis.tlast := broadcaster.io.m_axis.tlast(i)
     }
   }
-  broadcaster.io.m_axis.tready := VecInit.tabulate(2)(i => io.gather_out(i).ready).asUInt()
+
+  broadcaster.io.m_axis.tready := Cat(v2Apply_fifo.io.s_axis.tready, VecInit.tabulate(Broadcast_Num)(i => v2Broadcast_fifo(i).io.s_axis.tready).asUInt())
+
+  val v2Apply_selecter = Module(new axis_arbitrator(4, AXI_DATA_WIDTH / 4, 4))
+  v2Apply_selecter.io.xbar_in.valid := v2Apply_fifo.io.m_axis.tvalid
+  v2Apply_fifo.io.m_axis.tready := v2Apply_selecter.io.xbar_in.ready
+  v2Apply_fifo.io.m_axis.connectto(v2Apply_selecter.io.xbar_in.bits, 0)
+  v2Apply_selecter.io.ddr_out <> io.gather_out(Broadcast_Num)
+
+  val v2Broadcast_selecter = Seq.tabulate(Broadcast_Num)(
+    i => Module(new axis_arbitrator(4, AXI_DATA_WIDTH / 4 / Broadcast_Num, 4))
+  )
+  v2Broadcast_selecter.zipWithIndex.map{
+    case(s, i) => {
+      s.io.xbar_in.valid := v2Broadcast_fifo(i).io.m_axis.tvalid
+      v2Broadcast_fifo(i).io.m_axis.connectto(s.io.xbar_in.bits, 0)
+      v2Broadcast_fifo(i).io.m_axis.tready := s.io.xbar_in.ready
+      s.io.ddr_out <> io.gather_out(i)
+    }
+  }
 }
 
 //TODO: add read cache
-class readEdge_engine(AXI_ADDR_WIDTH : Int = 64, AXI_DATA_WIDTH: Int, AXI_ID_WIDTH: Int = 6, AXI_SIZE_WIDTH: Int = 3, EMBEDDING : Int = 14) extends Module{
+class readEdge_engine(AXI_ADDR_WIDTH : Int = 64, AXI_DATA_WIDTH: Int, AXI_ID_WIDTH: Int = 6, AXI_SIZE_WIDTH: Int = 3,
+                      EMBEDDING : Int = 14, Broadcast_Num : Int, Broadcast_index : Int) extends Module{
   val io = IO(new Bundle() {
     val in = Flipped(Decoupled(new axir(AXI_DATA_WIDTH, AXI_ID_WIDTH)))
     val out = Decoupled(new axiar(AXI_ADDR_WIDTH, AXI_ID_WIDTH, AXI_SIZE_WIDTH, 1))
@@ -308,6 +355,14 @@ class readEdge_engine(AXI_ADDR_WIDTH : Int = 64, AXI_DATA_WIDTH: Int, AXI_ID_WID
     mdata(63, 32)
   }
 
+  def get_flag(id : UInt) : Bool = {
+    id(AXI_ID_WIDTH - log2Ceil(Broadcast_Num) - 1).asBool()
+  }
+
+  def get_ptr(id : UInt) : UInt = {
+    id(AXI_ID_WIDTH - log2Ceil(Broadcast_Num) - 1 - 1, 0)
+  }
+
   //read edge array
   val edge_read_buffer = Module(new BRAM_fifo(32, 64, "meta_fifo"))
   val transaction_start = RegInit(false.B)
@@ -319,7 +374,7 @@ class readEdge_engine(AXI_ADDR_WIDTH : Int = 64, AXI_DATA_WIDTH: Int, AXI_ID_WID
   edge_read_buffer.io.clk := clock.asBool()
   edge_read_buffer.io.srst := reset.asBool()
   edge_read_buffer.io.din := io.in.bits.rdata(63, 0)
-  edge_read_buffer.io.wr_en := !io.in.bits.rid(AXI_ID_WIDTH - 1) & io.in.valid &
+  edge_read_buffer.io.wr_en := !get_flag(io.in.bits.rid) & io.in.valid &
     (get_edge_count(io.in.bits.rdata) > EMBEDDING.asUInt()) & (transaction_start === false.B)
   io.in.ready := edge_read_buffer.io.full === false.B
 
@@ -366,12 +421,19 @@ class readEdge_engine(AXI_ADDR_WIDTH : Int = 64, AXI_DATA_WIDTH: Int, AXI_ID_WID
   io.out.bits.arsize := MuxCase(log2Ceil(AXI_DATA_WIDTH).U(AXI_SIZE_WIDTH.W), Seq.tabulate(log2Ceil(AXI_DATA_WIDTH/4))(
     x => ((num_vertex <= Seq.tabulate(log2Ceil(AXI_DATA_WIDTH/4))(i => 1 << i)(x).asUInt()) -> (x + 2).asUInt())
   ))
-  io.out.bits.arid := Cat(1.U(1.W), io.free_ptr)
+  if(Broadcast_Num == 1){
+    io.out.bits.arid := Cat(1.U(1.W), io.free_ptr.asTypeOf(UInt((AXI_ID_WIDTH- 1).W)))
+  }else{
+    io.out.bits.arid := Cat(Broadcast_index.U(log2Ceil(Broadcast_Num).W),
+      Cat(1.U(1.W), io.free_ptr.asTypeOf(UInt((AXI_ID_WIDTH- 1 - log2Ceil(Broadcast_Num)).W))))
+  }
+
   edge_read_buffer.io.rd_en := io.out.ready & cache_status === cache_sm.idole
   io.read_edge_num := num_vertex
 }
 
-class Broadcast(AXI_ADDR_WIDTH : Int = 64, AXI_DATA_WIDTH: Int, AXI_ID_WIDTH: Int = 6, AXI_SIZE_WIDTH: Int = 3, EMBEDDING : Int = 14) extends Module{
+class Broadcast(AXI_ADDR_WIDTH : Int = 64, AXI_DATA_WIDTH: Int, AXI_ID_WIDTH: Int = 6, AXI_SIZE_WIDTH: Int = 3,
+                EMBEDDING : Int = 14, Broadcast_Num : Int, Broadcast_index : Int) extends Module{
   val io = IO(new Bundle() {
     val ddr_ar = Decoupled(new axiar(AXI_ADDR_WIDTH, AXI_ID_WIDTH, AXI_SIZE_WIDTH))
     val ddr_r = Flipped(Decoupled(new axir(AXI_DATA_WIDTH, AXI_ID_WIDTH)))
@@ -385,6 +447,8 @@ class Broadcast(AXI_ADDR_WIDTH : Int = 64, AXI_DATA_WIDTH: Int, AXI_ID_WIDTH: In
     val traveled_edges = Output(UInt(64.W))       //every super step
     val start = Input(Bool())
     val root = Input(UInt(32.W))
+    val inflight_vtxs_local = Output(UInt(64.W))
+    val inflight_vtxs_total = Input(UInt(64.W))
   })
   assert(AXI_DATA_WIDTH >= 8)
   assert(AXI_ID_WIDTH > log2Ceil(32))
@@ -400,6 +464,7 @@ class Broadcast(AXI_ADDR_WIDTH : Int = 64, AXI_DATA_WIDTH: Int, AXI_ID_WIDTH: In
   val inflight_vtxs = RegInit(0.U(64.W))
   val traveled_edges_reg = RegInit(0.U(64.W))
   io.traveled_edges := traveled_edges_reg
+  io.inflight_vtxs_local := inflight_vtxs
 
   //read offset and edge embedding array
   val vertex_read_buffer = Module(new BRAM_fifo(32, 32, "vid_fifo"))
@@ -408,8 +473,16 @@ class Broadcast(AXI_ADDR_WIDTH : Int = 64, AXI_DATA_WIDTH: Int, AXI_ID_WIDTH: In
   vertex_read_buffer.io.wr_en := io.gather_in.valid
   vertex_read_buffer.io.din := io.gather_in.bits.tdata
   io.gather_in.ready := vertex_read_buffer.io.full === false.B
+  val vertex_read_id = Wire(UInt(AXI_ID_WIDTH.W))
+  if(Broadcast_Num == 1){
+    vertex_read_id := Cat(0.U(1.W), vertex_read_buffer.io.data_count.asTypeOf(UInt((AXI_ID_WIDTH- 1).W)))
+  }else{
+    vertex_read_id := Cat(Broadcast_index.U(log2Ceil(Broadcast_Num).W),
+      Cat(0.U(1.W), vertex_read_buffer.io.data_count.asTypeOf(UInt((AXI_ID_WIDTH- 1 - log2Ceil(Broadcast_Num)).W))))
+  }
 
-  val edge_cache = Module(new readEdge_engine(AXI_ADDR_WIDTH, AXI_DATA_WIDTH, AXI_ID_WIDTH, AXI_SIZE_WIDTH, EMBEDDING))
+  val edge_cache = Module(new readEdge_engine(AXI_ADDR_WIDTH, AXI_DATA_WIDTH, AXI_ID_WIDTH, AXI_SIZE_WIDTH, EMBEDDING,
+    Broadcast_Num, Broadcast_index))
   edge_cache.io.edge_base_addr := io.edge_base_addr
   val r_demux = Module(new axis_broadcaster(AXI_DATA_WIDTH, 2, "r_demux", AXI_ID_WIDTH))
   val r_demux_out = Wire(Vec(2, Decoupled(new axir(AXI_DATA_WIDTH, AXI_ID_WIDTH))))
@@ -440,17 +513,17 @@ class Broadcast(AXI_ADDR_WIDTH : Int = 64, AXI_DATA_WIDTH: Int, AXI_ID_WIDTH: In
   arbi.io.in(1).bits.arburst := 1.U(2.W)
   arbi.io.in(1).bits.arlock := 0.U
   arbi.io.in(1).bits.arsize :=  log2Ceil(AXI_DATA_WIDTH).U(AXI_SIZE_WIDTH.W)
-  arbi.io.in(1).bits.arid :=  Cat(0.U(1.W), vertex_read_buffer.io.data_count.asTypeOf(UInt((AXI_ID_WIDTH-1).W)))
+  arbi.io.in(1).bits.arid :=  vertex_read_id
   vertex_read_buffer.io.rd_en := arbi.io.in(1).ready | upward_status === upward_sm.output_fin
   arbi.io.in(0) <> edge_cache.io.out
 
   //front end of down ward
   //TODO we should ensure regfile is big enough in case the data return slowly
-  val num_regfile = Module(new regFile(32, 32))
+  val num_regfile = Module(new regFile(32 / Broadcast_Num, 32))
   num_regfile.io.writeFlag := arbi.io.in(0).ready & arbi.io.in(0).valid
   num_regfile.io.wptr := num_regfile.io.wcount
   num_regfile.io.dataIn := edge_cache.io.read_edge_num
-  num_regfile.io.rptr := io.ddr_r.bits.rid(AXI_ID_WIDTH-2, 0)
+  num_regfile.io.rptr := edge_cache.get_ptr(r_demux_out(0).bits.rid)
   edge_cache.io.free_ptr := num_regfile.io.wcount
 
   //back end of down ward
@@ -466,7 +539,7 @@ class Broadcast(AXI_ADDR_WIDTH : Int = 64, AXI_DATA_WIDTH: Int, AXI_ID_WIDTH: In
   when(status === sm.firstBurst && r_demux_out(0).valid.asBool() && r_demux_out(0).ready.asBool()){
     when(r_demux_out(0).bits.rlast.asBool()){
       status := sm.firstBurst
-    }.elsewhen(r_demux_out(0).bits.rid(AXI_ID_WIDTH-1)){
+    }.elsewhen(edge_cache.get_flag(r_demux_out(0).bits.rid)){
       status := sm.remainingBurst_edge
     }.otherwise{
       status := sm.remainingBurst_embedding
@@ -478,7 +551,7 @@ class Broadcast(AXI_ADDR_WIDTH : Int = 64, AXI_DATA_WIDTH: Int, AXI_ID_WIDTH: In
 
   when(status === sm.firstBurst
       && r_demux_out(0).valid.asBool() && r_demux_out(0).ready.asBool() && !r_demux_out(0).bits.rlast.asBool()){
-    when(r_demux_out(0).bits.rid(AXI_ID_WIDTH-1)){
+    when(edge_cache.get_flag(r_demux_out(0).bits.rid)){
       num := num_regfile.io.dataOut
     }.otherwise{
       num := edge_cache.get_edge_count(r_demux_out(0).bits.rdata)
@@ -500,9 +573,9 @@ class Broadcast(AXI_ADDR_WIDTH : Int = 64, AXI_DATA_WIDTH: Int, AXI_ID_WIDTH: In
   val keep = Wire(Vec(KEEP_WIDTH, Bool()))
   keep.zipWithIndex.map {
     case(k, i) => k := MuxCase(false.B, Array(
-      (status === sm.firstBurst && r_demux_out(0).bits.rid(AXI_ID_WIDTH-1)) -> (num_regfile.io.dataOut > i.U),
+      (status === sm.firstBurst && edge_cache.get_flag(r_demux_out(0).bits.rid)) -> (num_regfile.io.dataOut > i.U),
       (status === sm.remainingBurst_edge) -> (num > i.U),
-      (status === sm.firstBurst && !r_demux_out(0).bits.rid(AXI_ID_WIDTH-1)) ->
+      (status === sm.firstBurst && !edge_cache.get_flag(r_demux_out(0).bits.rid)) ->
         ((i.U > 2.U) && ((edge_cache.get_edge_count(r_demux_out(0).bits.rdata) + 2.U) > i.U)),
       (status === sm.remainingBurst_embedding) -> (num > (i.U + KEEP_WIDTH.U - 2.U))
     ))
@@ -528,7 +601,7 @@ class Broadcast(AXI_ADDR_WIDTH : Int = 64, AXI_DATA_WIDTH: Int, AXI_ID_WIDTH: In
     upward_status := upward_sm.exe
   }.elsewhen(upward_status === upward_sm.exe && vertex_read_buffer.test_FIN()){
     upward_status := upward_sm.fin
-  }.elsewhen(upward_status === upward_sm.fin && inflight_vtxs === 0.U){
+  }.elsewhen(upward_status === upward_sm.fin && io.inflight_vtxs_total === 0.U){
     upward_status := upward_sm.output_fin
   }.elsewhen(upward_status === upward_sm.output_fin && vertex_out_fifo.io.full === false.B){
     upward_status := upward_sm.idole
@@ -536,7 +609,7 @@ class Broadcast(AXI_ADDR_WIDTH : Int = 64, AXI_DATA_WIDTH: Int, AXI_ID_WIDTH: In
 
   when(io.signal){
     traveled_edges_reg := 0.U
-  }.elsewhen(r_demux_out(0).valid.asBool() && r_demux_out(0).ready.asBool() && !r_demux_out(0).bits.rid(AXI_ID_WIDTH-1)
+  }.elsewhen(r_demux_out(0).valid.asBool() && r_demux_out(0).ready.asBool() && !edge_cache.get_flag(r_demux_out(0).bits.rid)
     && status === sm.firstBurst){
     traveled_edges_reg := traveled_edges_reg + edge_cache.get_edge_count(r_demux_out(0).bits.rdata)
   }
@@ -558,20 +631,30 @@ class Broadcast(AXI_ADDR_WIDTH : Int = 64, AXI_DATA_WIDTH: Int, AXI_ID_WIDTH: In
 class broadcast_xbar(AXIS_DATA_WIDTH: Int, SLAVE_NUM: Int, MASTER_NUM: Int) extends Module {
   val io = IO(new Bundle {
     val ddr_in = Vec(MASTER_NUM, Flipped(Decoupled(new axisdata(AXIS_DATA_WIDTH, 4))))
-    //val ddr_out = Flipped(Vec(MASTER_NUM, (new streamdata(AXIS_DATA_WIDTH, 4))))
-    val pe_out = (Vec(SLAVE_NUM, Decoupled(new axisdata(AXIS_DATA_WIDTH, 4))))
-    //val pe_in = Vec(SLAVE_NUM, (new streamdata(4, 4)))
+    val pe_out = Vec(SLAVE_NUM, Decoupled(new axisdata(AXIS_DATA_WIDTH * MASTER_NUM, 4)))
   })
   //ddr_in to pe_out direction
-  val arbitrator = Module(new Arbiter(new axisdata(AXIS_DATA_WIDTH, 4), MASTER_NUM))
-  arbitrator.io.in <> io.ddr_in
+  val xbar = Module(new axis_broadcaster(AXIS_DATA_WIDTH * MASTER_NUM, SLAVE_NUM, "axis_broadcaster"))
+  if(MASTER_NUM == 1){
+    xbar.io.s_axis.connectfrom(io.ddr_in(0).bits)
+    xbar.io.s_axis.tvalid := io.ddr_in(0).valid
+    io.ddr_in(0).ready := xbar.io.s_axis.tready
+  }else{
+    val combiner = Module(new axis_combiner(AXIS_DATA_WIDTH, MASTER_NUM, "axis_combiner"))
+    combiner.io.aclk := clock.asBool()
+    combiner.io.aresetn := ~reset.asBool()
+    combiner.io.s_axis.tdata := VecInit.tabulate(MASTER_NUM){i => io.ddr_in(i).bits.tdata}.asUInt()
+    combiner.io.s_axis.tkeep := VecInit.tabulate(MASTER_NUM){i => VecInit(io.ddr_in(i).bits.tkeep.asBools().map{x => x & io.ddr_in(i).valid})}.asUInt()
+    combiner.io.s_axis.tlast := VecInit.tabulate(MASTER_NUM){i => io.ddr_in(i).bits.tlast}.asUInt()
+    combiner.io.s_axis.tvalid := VecInit(Seq.fill(MASTER_NUM)(io.ddr_in.map{i => i.valid}.reduce(_|_))).asUInt()
+    io.ddr_in.zipWithIndex.map{
+      case(in, i) => {in.ready := combiner.io.s_axis.tready(i)}
+    }
+    xbar.io.s_axis <> combiner.io.m_axis
+  }
 
-  val xbar = Module(new axis_broadcaster(AXIS_DATA_WIDTH, SLAVE_NUM, "axis_broadcaster"))
   xbar.io.aclk := clock.asBool()
   xbar.io.aresetn := ~reset.asBool()
-  xbar.io.s_axis.connectfrom(arbitrator.io.out.bits)
-  xbar.io.s_axis.tvalid := arbitrator.io.out.valid
-  arbitrator.io.out.ready := xbar.io.s_axis.tready
   io.pe_out.zipWithIndex.map{
     case(pe, i) => {
       xbar.io.m_axis.connectto(pe.bits, i)
@@ -618,7 +701,9 @@ class Scatter(AXIS_DATA_WIDTH: Int = 4, SID: Int, AXI_DATA_WIDTH: Int) extends M
   val filtered_keep = Wire(Vec(Scatter_num, Bool()))
   filtered_keep.zipWithIndex.map{
     case(k, i) => {
-      k := Mux(io.xbar_in.bits.get_ith_data(i)(31), true.B, io.xbar_in.bits.tkeep(i) & vid_to_sid(io.xbar_in.bits.get_ith_data(i), SID.asUInt()))
+      k := Mux(io.xbar_in.bits.tkeep(i),
+        Mux(io.xbar_in.bits.get_ith_data(i)(31), true.B, vid_to_sid(io.xbar_in.bits.get_ith_data(i), SID.asUInt())),
+        false.B)
     }
   }
 
@@ -1084,15 +1169,16 @@ class BFS(AXI_ADDR_WIDTH : Int = 64, AXI_DATA_WIDTH: Int = 64, AXI_ID_WIDTH: Int
   val Scatters = Seq.tabulate(16)(
     i => Module(new Scatter(4, i, AXI_DATA_WIDTH))
   )
-  val Gathers = Module(new Gather())
+  val Gathers = Module(new Gather(64, 1))
   val Applys = Module(new Apply())
-  val Broadcasts = Module(new Broadcast(AXI_ADDR_WIDTH, AXI_DATA_WIDTH, AXI_ID_WIDTH, AXI_SIZE_WIDTH, 14))
+  val Broadcasts = Module(new Broadcast(AXI_ADDR_WIDTH, AXI_DATA_WIDTH, AXI_ID_WIDTH, AXI_SIZE_WIDTH,
+    14, 1, 0))
   val bxbar = Module(new broadcast_xbar(64, 16, 1))
 
   io.PLmemory <> pl_mc.io.ddr_out
   //Applys.io.level_size := 26.U
-  Applys.io.gather_in <> Gathers.io.gather_out(0)
-  Broadcasts.io.gather_in <> Gathers.io.gather_out(1)
+  Applys.io.gather_in <> Gathers.io.gather_out(1)
+  Broadcasts.io.gather_in <> Gathers.io.gather_out(0)
   Gathers.io.ddr_in <> pl_mc.io.cacheable_out
   bxbar.io.ddr_in(0) <> Broadcasts.io.xbar_out
 
@@ -1122,6 +1208,7 @@ class BFS(AXI_ADDR_WIDTH : Int = 64, AXI_DATA_WIDTH: Int = 64, AXI_ID_WIDTH: Int
   Broadcasts.io.start := controls.io.start
   Broadcasts.io.embedding_base_addr := Cat(controls.io.data(2), controls.io.data(1))
   Broadcasts.io.edge_base_addr := Cat(controls.io.data(4), controls.io.data(3))
+  Broadcasts.io.inflight_vtxs_total := Broadcasts.io.inflight_vtxs_local
   Applys.io.level_base_addr := Cat(controls.io.data(6), controls.io.data(5))
   Applys.io.level := controls.io.level
   pl_mc.io.tiers_base_addr(0) := Cat(controls.io.data(9), controls.io.data(8))
