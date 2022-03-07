@@ -24,9 +24,9 @@ class axiar(AXI_ADDR_WIDTH : Int = 44, AXI_ID_WIDTH: Int = 18, AXI_SIZE_WIDTH: I
   val arburst = (UInt((NUM * 2).W))
   val arlock = (UInt((NUM * 1).W))
 
-  def tie_off() = {
+  def tie_off(id : UInt) = {
     araddr := 0.U
-    arid := 0.U
+    arid := id
     arlen := 0.U
     arsize := 0.U
     arburst := 0.U
@@ -42,9 +42,9 @@ class axiaw(AXI_ADDR_WIDTH : Int = 44, AXI_ID_WIDTH: Int = 18, AXI_SIZE_WIDTH: I
   val awburst = (UInt((NUM * 2).W))
   val awlock = (UInt((NUM * 1).W))
 
-  def tie_off() = {
+  def tie_off(id : UInt) = {
     awaddr := 0.U
-    awid := 0.U
+    awid := id
     awlen := 0.U
     awsize := 0.U
     awburst := 0.U

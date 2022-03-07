@@ -24,18 +24,18 @@ object BFSgen extends App {
 class BFS_ps(AXI_ADDR_WIDTH : Int = 64, AXI_DATA_WIDTH: Int = 64, AXI_ID_WIDTH: Int = 6, AXI_SIZE_WIDTH: Int = 3) extends Module{
   val io = IO(new Bundle() {
     val config = new axilitedata(AXI_ADDR_WIDTH)
-    val PLmemory = Vec(2, Flipped(new axidata(AXI_ADDR_WIDTH, AXI_DATA_WIDTH, AXI_ID_WIDTH, AXI_SIZE_WIDTH)))
+    val PLmemory = Vec(2, Flipped(new axidata(AXI_ADDR_WIDTH, AXI_DATA_WIDTH, AXI_ID_WIDTH + 1, AXI_SIZE_WIDTH)))
     val PSmemory = Vec(4, Flipped(new axidata(AXI_ADDR_WIDTH, 16, AXI_ID_WIDTH, AXI_SIZE_WIDTH)))
   })
 
   val controls = Module(new controller(AXI_ADDR_WIDTH, 16))
 
-  val pl_mc = Module(new multi_port_mc(AXI_ADDR_WIDTH, AXI_DATA_WIDTH, AXI_ID_WIDTH, AXI_SIZE_WIDTH, 16))
+  val pl_mc = Module(new multi_port_mc(AXI_ADDR_WIDTH, AXI_DATA_WIDTH, AXI_ID_WIDTH + 1, AXI_SIZE_WIDTH, 16))
   val Scatters = Seq.tabulate(16)(
     i => Module(new Scatter(4, i, AXI_DATA_WIDTH))
   )
   val Gathers = Module(new Gather(64, 4))
-  val Applys = Module(new Apply())
+  val Applys = Module(new Apply(AXI_ADDR_WIDTH, AXI_DATA_WIDTH, AXI_ID_WIDTH + 1, AXI_SIZE_WIDTH))
   val Broadcasts = Seq.tabulate(4)(
     i => Module(new Broadcast(64, 16, 6, 3,
       14, 4, i))
@@ -48,14 +48,13 @@ class BFS_ps(AXI_ADDR_WIDTH : Int = 64, AXI_DATA_WIDTH: Int = 64, AXI_ID_WIDTH: 
   Applys.io.ddr_w <> pl_mc.io.non_cacheable_in.w
   Applys.io.ddr_aw <> pl_mc.io.non_cacheable_in.aw
   Applys.io.ddr_b <> pl_mc.io.non_cacheable_in.b
-  val inflight_vtxs = Broadcasts.map{i => i.io.inflight_vtxs_local}.reduce(_+_)
   Broadcasts.zipWithIndex.map{
     case (b, i) => {
       b.io.gather_in <> Gathers.io.gather_out(i)
       b.io.ddr_r <> io.PSmemory(i).r
       b.io.ddr_ar <> io.PSmemory(i).ar
       bxbar.io.ddr_in(i) <> b.io.xbar_out
-      b.io.inflight_vtxs_total := inflight_vtxs
+      b.io.recv_sync := VecInit(Broadcasts.map{i => i.io.issue_sync}).asUInt()
     }
   }
   Scatters.zipWithIndex.map{
@@ -70,14 +69,14 @@ class BFS_ps(AXI_ADDR_WIDTH : Int = 64, AXI_DATA_WIDTH: Int = 64, AXI_ID_WIDTH: 
   io.PSmemory.map{
     i => {
       i.b.ready := false.B
-      i.aw.bits.tie_off()
+      i.aw.bits.tie_off(0.U)
       i.aw.valid := false.B
       i.w.bits.tie_off()
       i.w.valid := false.B
     }
   }
   pl_mc.io.non_cacheable_in.r.ready := false.B
-  pl_mc.io.non_cacheable_in.ar.bits.tie_off()
+  pl_mc.io.non_cacheable_in.ar.bits.tie_off((1.U << AXI_ID_WIDTH).asUInt())
   pl_mc.io.non_cacheable_in.ar.valid := false.B
 
   //control path
