@@ -28,6 +28,10 @@ class WB_engine(AXI_ADDR_WIDTH : Int = 64, AXI_DATA_WIDTH: Int = 64, AXI_ID_WIDT
     Cat(block_index, size.asTypeOf(UInt(6.W)))
   }
 
+  def counter_inc(counter : UInt) : UInt = {
+    Mux(counter === 63.U, 0.U, counter + 1.U)
+  }
+
   //read region counter
   val vid = io.xbar_in.bits.tdata
   val level = io.level
@@ -60,7 +64,7 @@ class WB_engine(AXI_ADDR_WIDTH : Int = 64, AXI_DATA_WIDTH: Int = 64, AXI_ID_WIDT
 
   val region_counter_addra_0 = pipeline_1.io.dout.bits.block_index
   val region_counter_wea_0 = pipeline_1.io.dout.valid && pipeline_1.io.dout.ready
-  val region_counter_dina_0 = region_counter_doutb + 1.U
+  val region_counter_dina_0 = counter_inc(region_counter_doutb)
 
   region_counter_doutb_forward.io.din.valid := io.xbar_in.valid && io.xbar_in.ready &&
     region_counter_addra_0 === region_counter_addrb_0 && region_counter_wea_0
@@ -82,7 +86,7 @@ class WB_engine(AXI_ADDR_WIDTH : Int = 64, AXI_DATA_WIDTH: Int = 64, AXI_ID_WIDT
   val flush_start = (wb_sm === sm.idole) && io.flush
   val size_b = RegInit(0.U(8.W))
   val level_base_addr_reg = RegInit(0.U(64.W))
-  val wb_start = pipeline_1.io.dout.valid && region_counter_doutb === 63.U
+  val wb_start = pipeline_1.io.dout.valid && region_counter_doutb === 63.U  && wb_sm === sm.idole
   pipeline_1.io.dout.ready := wb_sm === sm.idole
   region_counter_doutb_forward.io.dout.ready := wb_sm === sm.idole
   level_base_addr_reg := io.level_base_addr
@@ -151,7 +155,8 @@ class WB_engine(AXI_ADDR_WIDTH : Int = 64, AXI_DATA_WIDTH: Int = 64, AXI_ID_WIDT
   region_counter.io.dina := Mux(wb_sm === sm.wb_level, 0.U, region_counter_dina_0)
   region_counter.io.addrb := MuxCase(block_index, Array(
     (wb_sm === sm.wb_1block) -> (wb_block_index + 1.U),
-    (flush_start) -> 0.U
+    (flush_start) -> 0.U,
+    (wb_sm === sm.wb_level) -> (pipeline_1.io.dout.bits.block_index)
   ))
 
   aw_buffer.io.clk := clock.asBool()
