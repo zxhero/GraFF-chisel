@@ -84,7 +84,8 @@ class BFS_ps(AXI_ADDR_WIDTH : Int = 64, AXI_DATA_WIDTH: Int = 64, AXI_ID_WIDTH: 
   controls.io.traveled_edges := Broadcasts.map{i => i.io.traveled_edges}.reduce(_+_)
   controls.io.unvisited_size := pl_mc.io.unvisited_size
   controls.io.flush_cache_end := Applys.io.end
-  Gathers.io.signal := controls.io.signal
+  controls.io.signal_ack := pl_mc.io.signal_ack
+  //Gathers.io.signal := controls.io.signal
   Applys.io.flush := controls.io.flush_cache
   Applys.io.level_base_addr := Cat(controls.io.data(6), controls.io.data(5))
   Applys.io.level := controls.io.level

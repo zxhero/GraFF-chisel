@@ -274,7 +274,7 @@ class Gather(AXI_DATA_WIDTH: Int = 64, Broadcast_Num: Int) extends Module{
     val gather_out = Vec(1 + Broadcast_Num, Decoupled(new axisdata(4, 4)))
 
     //control path
-    val signal = Input(Bool())
+    //val signal = Input(Bool())
   })
   val broadcaster = Module(new axis_broadcaster(AXI_DATA_WIDTH, (1 + Broadcast_Num), "gather_broadcaster"))
   broadcaster.io.s_axis.connectfrom(io.ddr_in.bits)
@@ -888,6 +888,7 @@ class multi_port_mc(AXI_ADDR_WIDTH : Int = 64, AXI_DATA_WIDTH: Int = 64, AXI_ID_
     val start = Input(Bool())
     val signal = Input(Bool())
     val end = Input(Bool())
+    val signal_ack = Output(Bool())
   })
 
   val tier_fifo = Seq.tabulate(2)(i => Module(new multi_channel_fifo(AXI_DATA_WIDTH, 16, Scatter_num)))
@@ -1049,6 +1050,8 @@ class multi_port_mc(AXI_ADDR_WIDTH : Int = 64, AXI_DATA_WIDTH: Int = 64, AXI_ID_
 
   io.ddr_out(0) <> axi
   io.ddr_out(1) <> io.non_cacheable_in
+
+  io.signal_ack := status === sm.signal_wait_1 | status === sm.signal_wait_0
 }
 
 /*
@@ -1067,6 +1070,7 @@ class controller (AXI_ADDR_WIDTH : Int = 64, Scatter_num : Int) extends Module{
     val config = (new axilitedata(AXI_ADDR_WIDTH))
     val flush_cache = Output(Bool())
     val flush_cache_end = Input(Bool())
+    val signal_ack = Input(Bool())
   })
 
   //0 --- start and end register
@@ -1103,7 +1107,7 @@ class controller (AXI_ADDR_WIDTH : Int = 64, Scatter_num : Int) extends Module{
   val counterValue = RegInit(0.U(64.W))
 
   controls.config <> io.config
-  controls.io.writeFlag(0) := status === sm.end | status === sm.fin | status === sm.write_clock
+  controls.io.writeFlag(0) := status === sm.end | (status === sm.fin && io.signal_ack === true.B) | status === sm.write_clock
   controls.io.wptr(0) := Mux1H(Seq(
     (status === sm.fin) -> 12.U,
     (status === sm.write_clock) -> 14.U,
@@ -1114,7 +1118,7 @@ class controller (AXI_ADDR_WIDTH : Int = 64, Scatter_num : Int) extends Module{
     (status === sm.write_clock) -> counterValue(31, 0),
     (status === sm.end) -> 2.U
   ))
-  controls.io.writeFlag(1) := status === sm.fin | status === sm.write_clock
+  controls.io.writeFlag(1) := (status === sm.fin && io.signal_ack === true.B) | status === sm.write_clock
   controls.io.wptr(1) := Mux(status === sm.fin, 13.U, 15.U)
   controls.io.dataIn(1) := Mux1H(Seq(
     (status === sm.fin) -> new_tep(31, 0),
@@ -1127,7 +1131,7 @@ class controller (AXI_ADDR_WIDTH : Int = 64, Scatter_num : Int) extends Module{
     status := sm.exe
   }.elsewhen(status === sm.exe && FIN.reduce(_&_)){
     status := sm.fin
-  }.elsewhen(status === sm.fin){
+  }.elsewhen(status === sm.fin && io.signal_ack === true.B){
     when(io.unvisited_size === 0.U){
       status := sm.write_clock
     }.otherwise{
@@ -1151,7 +1155,7 @@ class controller (AXI_ADDR_WIDTH : Int = 64, Scatter_num : Int) extends Module{
     }
   }
 
-  when(status === sm.fin){
+  when(status === sm.fin && io.signal_ack === true.B){
     level := level + 1.U
   }.elsewhen(status === sm.idole && start){
     level := "xffffffff".asUInt(32.W)
@@ -1216,8 +1220,9 @@ class BFS(AXI_ADDR_WIDTH : Int = 64, AXI_DATA_WIDTH: Int = 64, AXI_ID_WIDTH: Int
   controls.io.traveled_edges := Broadcasts.io.traveled_edges
   controls.io.unvisited_size := pl_mc.io.unvisited_size
   controls.io.flush_cache_end := Applys.io.end
+  controls.io.signal_ack := pl_mc.io.signal_ack
   Applys.io.flush := controls.io.flush_cache
-  Gathers.io.signal := controls.io.signal
+  //Gathers.io.signal := controls.io.signal
   Broadcasts.io.signal := controls.io.signal
   Broadcasts.io.root := controls.io.data(7)
   Broadcasts.io.start := controls.io.start
