@@ -572,7 +572,7 @@ class Broadcast(AXI_ADDR_WIDTH : Int = 64, AXI_DATA_WIDTH: Int, AXI_ID_WIDTH: In
       (status === sm.firstBurst && edge_cache.get_flag(r_demux_out(0).bits.rid)) -> (num_regfile.io.dataOut > i.U),
       (status === sm.remainingBurst_edge) -> (num > i.U),
       (status === sm.firstBurst && !edge_cache.get_flag(r_demux_out(0).bits.rid)) ->
-        ((i.U > 2.U) && ((edge_cache.get_edge_count(r_demux_out(0).bits.rdata) + 2.U) > i.U)),
+        ((i.U > 1.U) && ((edge_cache.get_edge_count(r_demux_out(0).bits.rdata) + 2.U) > i.U)),
       (status === sm.remainingBurst_embedding) -> (num > (i.U + KEEP_WIDTH.U - 2.U))
     ))
   }
