@@ -223,7 +223,7 @@ class AMBA_Arbiter[T <: Data](val gen: T, val n: Int) extends Module {
     }
   }
 
-  when(io.in.map(_.valid).reduce(_|_) && status === sm.idole){
+  when(io.in.map(_.valid).reduce(_|_) && status === sm.idole && io.out.ready === false.B){
     grant_reg := grant.zip(io.in).map{
       case(g, in) => g & in.valid
     }

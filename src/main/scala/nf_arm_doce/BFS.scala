@@ -350,6 +350,8 @@ class readEdge_engine(AXI_ADDR_WIDTH : Int = 64, AXI_DATA_WIDTH: Int, AXI_ID_WID
     val edge_base_addr = Input(UInt(64.W))
     val free_ptr = Input(UInt((AXI_ID_WIDTH-1).W))
     val read_edge_num = Output(UInt(32.W))
+    val read_edge_fifo_empty = Output(Bool())
+    val inflight_vtxs = Input(UInt(64.W))
   })
 
   def get_edge_array_index(mdata : UInt) : UInt = {
@@ -382,9 +384,9 @@ class readEdge_engine(AXI_ADDR_WIDTH : Int = 64, AXI_DATA_WIDTH: Int, AXI_ID_WID
   edge_read_buffer.io.wr_en := !get_flag(io.in.bits.rid) & io.in.valid &
     (get_edge_count(io.in.bits.rdata) > EMBEDDING.asUInt()) & (transaction_start === false.B)
   io.in.ready := edge_read_buffer.io.full === false.B
+  io.read_edge_fifo_empty := edge_read_buffer.is_empty()
 
   val remainning_edges = (get_edge_count(edge_read_buffer.io.dout) - EMBEDDING.asUInt())
-  // TODO we assume number of edges of a vertex is less than 4096 + 14 for now.
   object cache_sm extends ChiselEnum {
     val idole = Value(0x0.U)
     val next_page  = Value(0x1.U) // i "load"  -> 000_0011
@@ -420,7 +422,7 @@ class readEdge_engine(AXI_ADDR_WIDTH : Int = 64, AXI_DATA_WIDTH: Int, AXI_ID_WID
   io.out.bits.araddr := Mux(cache_status === cache_sm.idole,
     io.edge_base_addr + (get_edge_array_index(edge_read_buffer.io.dout) << 2),
     araddr)
-  io.out.valid := Mux(cache_status === cache_sm.idole, edge_read_buffer.is_valid(), true.B)
+  io.out.valid := Mux(cache_status === cache_sm.idole, edge_read_buffer.is_valid(), true.B) && io.inflight_vtxs < 32.U
   io.out.bits.arlen := arlen.asUInt()
   io.out.bits.arburst := 1.U(2.W)
   io.out.bits.arlock := 0.U
@@ -429,7 +431,7 @@ class readEdge_engine(AXI_ADDR_WIDTH : Int = 64, AXI_DATA_WIDTH: Int, AXI_ID_WID
   ))
   io.out.bits.arid := Cat(1.U(1.W), io.free_ptr.asTypeOf(UInt((AXI_ID_WIDTH- 1).W)))
 
-  edge_read_buffer.io.rd_en := io.out.ready & cache_status === cache_sm.idole
+  edge_read_buffer.io.rd_en := io.out.ready & cache_status === cache_sm.idole && io.inflight_vtxs < 32.U
   io.read_edge_num := num_vertex
 }
 
@@ -480,6 +482,7 @@ class Broadcast(AXI_ADDR_WIDTH : Int = 64, AXI_DATA_WIDTH: Int, AXI_ID_WIDTH: In
   val edge_cache = Module(new readEdge_engine(AXI_ADDR_WIDTH, AXI_DATA_WIDTH, AXI_ID_WIDTH, AXI_SIZE_WIDTH, EMBEDDING,
     Broadcast_Num, Broadcast_index))
   edge_cache.io.edge_base_addr := io.edge_base_addr
+  edge_cache.io.inflight_vtxs := inflight_vtxs
   val r_demux = Module(new axis_broadcaster(AXI_DATA_WIDTH, 2, "r_demux", AXI_ID_WIDTH))
   val r_demux_out = Wire(Vec(2, Decoupled(new axir(AXI_DATA_WIDTH, AXI_ID_WIDTH))))
   r_demux.io.s_axis.tvalid := io.ddr_r.valid
@@ -514,7 +517,6 @@ class Broadcast(AXI_ADDR_WIDTH : Int = 64, AXI_DATA_WIDTH: Int, AXI_ID_WIDTH: In
   arbi.io.in(0) <> edge_cache.io.out
 
   //front end of down ward
-  //TODO we should ensure regfile is big enough in case the data return slowly
   val num_regfile = Module(new regFile(32, 32))
   num_regfile.io.writeFlag := arbi.io.in(0).ready & arbi.io.in(0).valid
   num_regfile.io.wptr := num_regfile.io.wcount
@@ -608,7 +610,8 @@ class Broadcast(AXI_ADDR_WIDTH : Int = 64, AXI_DATA_WIDTH: Int, AXI_ID_WIDTH: In
     upward_status := upward_sm.exe
   }.elsewhen(upward_status === upward_sm.exe && (vertex_read_buffer.test_FIN() || syncRecv.reduce(_|_))){
     upward_status := upward_sm.fin
-  }.elsewhen(upward_status === upward_sm.fin && inflight_vtxs === 0.U && vertex_out_fifo.io.empty === true.B){
+  }.elsewhen(upward_status === upward_sm.fin && inflight_vtxs === 0.U && vertex_out_fifo.is_empty()
+            && edge_cache.io.read_edge_fifo_empty === true.B){
     upward_status := upward_sm.sync
   }.elsewhen(upward_status === upward_sm.sync && syncRecv.reduce(_&_)){
     when(Broadcast_index.U === 0.U ){
@@ -794,7 +797,6 @@ class multi_channel_fifo(AXI_DATA_WIDTH: Int = 64, size : Int = 16, val Scatter_
       val full = Output(Bool())
       val din = Input(UInt((8 * AXI_DATA_WIDTH).W))
       val wr_en = Input(Bool())
-      val empty = Output(Bool())
       val dout = Output(UInt((8 * AXI_DATA_WIDTH).W))
       val rd_en = Input(Bool())
       val data_count = Output(UInt((log2Ceil(size * AXI_DATA_WIDTH / 4) + 1).W))
@@ -867,7 +869,6 @@ class multi_channel_fifo(AXI_DATA_WIDTH: Int = 64, size : Int = 16, val Scatter_
   io.out.dout := collector_data.asUInt()
   io.out.data_count := collector_fifos.map{i => i.io.data_count.asTypeOf(UInt((log2Ceil(size * AXI_DATA_WIDTH / 4) + 1).W))}.reduce(_+_)
   io.out.full := ~fifos_ready
-  io.out.empty := collector_fifos.map{i => i.io.empty}.reduce(_&_)
 }
 
 /*
