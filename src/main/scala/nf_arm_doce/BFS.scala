@@ -598,10 +598,10 @@ class Broadcast(AXI_ADDR_WIDTH : Int = 64, AXI_DATA_WIDTH: Int, AXI_ID_WIDTH: In
   val syncRecv = RegInit(VecInit(Seq.fill(Broadcast_Num)(false.B)))
   syncRecv.zipWithIndex.map{
     case(f, i) => {
-      when(io.recv_sync(i)){
-        f := true.B
-      }.elsewhen(io.signal){
+      when(io.signal){
         f := false.B
+      }.elsewhen(io.recv_sync(i)){
+        f := true.B
       }
     }
   }
@@ -686,35 +686,42 @@ class broadcast_xbar(AXIS_DATA_WIDTH: Int, SLAVE_NUM: Int, MASTER_NUM: Int) exte
 * end: there is no more vertexes for the level
 * 1M vertex for each scatter
 * */
-class Scatter(AXIS_DATA_WIDTH: Int = 4, SID: Int, AXI_DATA_WIDTH: Int) extends Module {
+class Scatter(AXIS_DATA_WIDTH: Int = 4, SID: Int, AXI_DATA_WIDTH: Int,
+              FPGA_Num: Int, Apply_num : Int) extends Module {
   val io = IO(new Bundle() {
     val xbar_in = Flipped(Decoupled(new axisdata(AXI_DATA_WIDTH, 4)))
     val ddr_out = Decoupled(new axisdata(AXIS_DATA_WIDTH, 4))
 
     //control path
     val end = Output(Bool())
+    val local_fpga_id = Input(UInt(log2Ceil(FPGA_Num).W))
   })
-  val Scatter_num = AXI_DATA_WIDTH / 4
-  val bitmap = Module(new BRAM(116 * 1024 * 16 / Scatter_num, 9, "bitmap_0"))
-  val arbi = Module(new axis_arbitrator(4, Scatter_num, 4))
+  val vertex_num = AXI_DATA_WIDTH / 4
+  val bitmap = Module(new BRAM(116 * 1024 * 16 / Apply_num, 9, "bitmap_0"))
+  val arbi = Module(new axis_arbitrator(4, vertex_num, 4))
 
   def vid_to_sid(vid: UInt, sid: UInt) : Bool = {
-    vid(log2Ceil(Scatter_num) - 1, 0) === sid
+    if(FPGA_Num == 1) {
+      vid(log2Ceil(Apply_num) - 1, 0) === sid
+    }else{
+      vid(log2Ceil(Apply_num) - 1, 0) === sid &&
+        vid(log2Ceil(Apply_num) + log2Ceil(FPGA_Num) - 1, log2Ceil(Apply_num)) === io.local_fpga_id
+    }
   }
 
   def vid2bitmap_addr(vid: UInt) : UInt = {
-    Mux(vid(30, log2Ceil(Scatter_num)) > (8 * 116 * 1024 * 16 / Scatter_num - 1).U(27.W),
-      vid(30, log2Ceil(Scatter_num)) - (8 * 116 * 1024 * 16 / Scatter_num - 1).U(27.W),
-      vid(30, log2Ceil(Scatter_num) + 3).asTypeOf(UInt(27.W)))
+    Mux(vid(30, log2Ceil(Apply_num) + log2Ceil(FPGA_Num)) > (8 * 116 * 1024 * 16 / Apply_num - 1).U(27.W),
+      vid(30, log2Ceil(Apply_num) + log2Ceil(FPGA_Num)) - (8 * 116 * 1024 * 16 / Apply_num - 1).U(27.W),
+      vid(30, log2Ceil(Apply_num) + log2Ceil(FPGA_Num) + 3).asTypeOf(UInt(27.W)))
   }
 
   def vid2bitmap_offset(vid: UInt) : UInt = {
-    Mux(vid(30, log2Ceil(Scatter_num)) > (8 * 116 * 1024 * 16 / Scatter_num - 1).U(27.W),
+    Mux(vid(30, log2Ceil(Apply_num) + log2Ceil(FPGA_Num)) > (8 * 116 * 1024 * 16 / Apply_num - 1).U(27.W),
       8.U(4.W),
-      vid(log2Ceil(Scatter_num) + 2, log2Ceil(Scatter_num)).asTypeOf(UInt(4.W)))
+      vid(log2Ceil(Apply_num) + log2Ceil(FPGA_Num) + 2, log2Ceil(Apply_num) + log2Ceil(FPGA_Num)).asTypeOf(UInt(4.W)))
   }
 
-  val filtered_keep = Wire(Vec(Scatter_num, Bool()))
+  val filtered_keep = Wire(Vec(vertex_num, Bool()))
   filtered_keep.zipWithIndex.map{
     case(k, i) => {
       k := Mux(io.xbar_in.bits.tkeep(i),
@@ -805,6 +812,8 @@ class multi_channel_fifo(AXI_DATA_WIDTH: Int = 64, size : Int = 16, val Scatter_
     val flush = Input(Bool())
     val is_current_tier = Input(Bool())
   })
+
+  assert(Scatter_num <= 16)
 
   def is_empty() : Bool = {
     io.out.data_count === 0.U
@@ -1059,7 +1068,7 @@ class multi_port_mc(AXI_ADDR_WIDTH : Int = 64, AXI_DATA_WIDTH: Int = 64, AXI_ID_
 * traveled_edges: updated every super step
 * unvisited_size: unvisited vertex in tiers
 * */
-class controller (AXI_ADDR_WIDTH : Int = 64, Scatter_num : Int) extends Module{
+class controller (AXI_ADDR_WIDTH : Int = 64, Scatter_num : Int, RegName : Map[String, Int] = Map()) extends Module{
   val io = IO(new Bundle() {
     val data = Output(Vec(32, UInt(32.W)))
     val fin = Input(Vec(Scatter_num, (Bool())))
@@ -1074,6 +1083,9 @@ class controller (AXI_ADDR_WIDTH : Int = 64, Scatter_num : Int) extends Module{
     val signal_ack = Input(Bool())
   })
 
+  def GetRegByName(name : String): UInt = {
+    io.data(RegName(name))
+  }
   //0 --- start and end register
   //1 --- embedding_base_addr(31, 0)
   //2 --- embedding_base_addr(63, 32)
@@ -1187,7 +1199,7 @@ class BFS(AXI_ADDR_WIDTH : Int = 64, AXI_DATA_WIDTH: Int = 64, AXI_ID_WIDTH: Int
 
   val pl_mc = Module(new multi_port_mc(AXI_ADDR_WIDTH, AXI_DATA_WIDTH, AXI_ID_WIDTH, AXI_SIZE_WIDTH, 16))
   val Scatters = Seq.tabulate(16)(
-    i => Module(new Scatter(4, i, AXI_DATA_WIDTH))
+    i => Module(new Scatter(4, i, AXI_DATA_WIDTH, 1, 16))
   )
   val Gathers = Module(new Gather(64, 1))
   val Applys = Module(new Apply())
@@ -1213,6 +1225,7 @@ class BFS(AXI_ADDR_WIDTH : Int = 64, AXI_DATA_WIDTH: Int = 64, AXI_ID_WIDTH: Int
       pe.io.xbar_in <> bxbar.io.pe_out(i)
       pe.io.ddr_out <> pl_mc.io.cacheable_in(i)
       controls.io.fin(i) := pe.io.end
+      pe.io.local_fpga_id := 0.U
     }
   }
 

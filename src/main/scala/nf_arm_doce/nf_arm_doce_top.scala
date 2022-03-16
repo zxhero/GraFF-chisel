@@ -67,12 +67,23 @@ class axiw(AXI_DATA_WIDTH: Int = 16, NUM : Int = 1) extends Bundle {
 class axib(AXI_ID_WIDTH: Int = 18, NUM : Int = 1) extends Bundle {
   val bresp = (UInt((NUM * 2).W))
   val bid = (UInt((NUM * AXI_ID_WIDTH).W))
+
+  def tie_off() = {
+    bresp := 0.U
+    bid := 0.U
+  }
 }
 
 class axir(AXI_DATA_WIDTH: Int = 16, AXI_ID_WIDTH: Int = 18, NUM : Int = 1) extends Bundle{
   val rdata = (UInt((NUM*8*AXI_DATA_WIDTH).W))
   val rid = (UInt((NUM * AXI_ID_WIDTH).W))
   val rlast = (UInt((NUM * 1).W))
+
+  def tie_off() = {
+    rdata := 0.U
+    rid := 0.U
+    rlast := 0.U
+  }
 }
 
 class axidata(AXI_ADDR_WIDTH : Int = 44, AXI_DATA_WIDTH: Int = 16, AXI_ID_WIDTH: Int = 18, AXI_SIZE_WIDTH: Int = 3, NUM : Int = 1) extends Bundle {
