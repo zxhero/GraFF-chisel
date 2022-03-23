@@ -1174,7 +1174,8 @@ class controller (AXI_ADDR_WIDTH : Int = 64, Scatter_num : Int, RegName : Map[St
     level := "xffffffff".asUInt(32.W)
   }
 
-  when(status === sm.start) {
+  val global_start = status === sm.fin && io.signal_ack === true.B && level === "xffffffff".asUInt(32.W)
+  when(global_start) {
     counterValue := 0.U
   }.otherwise{
     counterValue := counterValue + 1.U
