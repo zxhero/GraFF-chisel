@@ -4,6 +4,101 @@ import chisel3.experimental.ChiselEnum
 import chisel3.util._
 import nf_arm_doce._
 
+class LookupTable(width: Int = 32, depth : Int, AXI_ADDR_WIDTH : Int = 44) extends MultiIOModule {
+  val io = IO(new Bundle() {
+    val data = Output(Vec(depth, UInt(width.W)))
+    val dataIn = Input(Vec(2, UInt(width.W)))
+    val writeFlag = Input(Vec(2, Bool()))
+    val wptr = Input(Vec(2, UInt((log2Ceil(depth)).W)))
+
+  })
+  val config = IO(new axilitedata(AXI_ADDR_WIDTH))
+  val table = RegInit(VecInit(Seq.fill(depth)(0.U(width.W))))
+
+  object sm extends ChiselEnum {
+    val idole = Value(0x0.U)
+    val get_aw  = Value(0x1.U) // i "load"  -> 000_0011
+    val get_w = Value(0x2.U)
+    val w_done = Value(0x3.U)
+    val get_ar = Value(0x4.U)
+    val r_done = Value(0x5.U)
+  }
+  val status = RegInit(sm.idole)
+
+  when(status === sm.idole){
+    when(config.awvalid){
+      status := sm.get_aw
+    }.elsewhen(config.arvalid){
+      status := sm.get_ar
+    }
+  }.elsewhen(status === sm.get_aw){
+    when(config.wvalid){
+      status := sm.get_w
+    }
+  }.elsewhen(status === sm.get_w){
+    status := sm.w_done
+  }.elsewhen(status === sm.w_done){
+    when(config.bready){
+      status := sm.idole
+    }
+  }.elsewhen(status === sm.get_ar){
+    status := sm.r_done
+  }.elsewhen(status === sm.r_done) {
+    when(config.rready) {
+      status := sm.idole
+    }
+  }
+
+  //connections
+  io.data := table
+  config.wready := status === sm.get_aw
+  config.awready := status === sm.idole
+  config.arready := status === sm.idole
+  config.rvalid := status === sm.r_done
+  config.bvalid := status === sm.w_done
+  config.bresp := (0.U(2.W))
+  config.rresp := (0.U(2.W))
+
+  //write channel
+  val wbytes = config.wdata
+  val wvalid = config.wvalid && config.wready
+  val ewaddr = Reg(UInt((log2Ceil(depth)).W))
+  when(config.awvalid && config.awready){
+    ewaddr := config.awaddr((log2Ceil(depth) + log2Ceil(width / 8) - 1), log2Ceil(width / 8))
+  }
+
+  when(wvalid && io.writeFlag.reduce(_&_)){
+    table(ewaddr) := wbytes.asUInt()
+    table(io.wptr(0)) := io.dataIn(0)
+    table(io.wptr(1)) := io.dataIn(1)
+  }.elsewhen(wvalid && io.writeFlag(0)){
+    table(ewaddr) := wbytes.asUInt()
+    table(io.wptr(0)) := io.dataIn(0)
+  }.elsewhen(wvalid && io.writeFlag(1)){
+    table(ewaddr) := wbytes.asUInt()
+    table(io.wptr(1)) := io.dataIn(1)
+  }.elsewhen(wvalid){
+    table(ewaddr) := wbytes.asUInt()
+  }.elsewhen(io.writeFlag.reduce(_&_)){
+    table(io.wptr(0)) := io.dataIn(0)
+    table(io.wptr(1)) := io.dataIn(1)
+  }.elsewhen(io.writeFlag(0)){
+    table(io.wptr(0)) := io.dataIn(0)
+  }.elsewhen(io.writeFlag(1)){
+    table(io.wptr(1)) := io.dataIn(1)
+  }
+
+  //read address channel
+  val eraddr = Reg(UInt((log2Ceil(depth)).W))
+  when(config.arvalid && config.arready){
+    eraddr := config.araddr((log2Ceil(depth) + log2Ceil(width / 8) - 1), log2Ceil(width / 8))
+  }
+
+  //read channel
+  val rdata = table(eraddr)
+  config.rdata := rdata
+}
+
 //URAM and BRAM's read latency is 1 cycle
 class URAMIO(size : Int, width : Int) extends Bundle{
   val addra = Input(UInt(log2Ceil(size).W))
@@ -142,12 +237,34 @@ class pipeline[T <: Data](gen: T) extends Module{
 
   val data = RegInit(0.U.asTypeOf(gen))
   val valid = RegInit(false.B)
+  val ready = RegInit(false.B)
+  val data2 = RegInit(0.U.asTypeOf((gen)))
+  val valid2 = RegInit(false.B)
   when(io.dout.ready){
-    data := io.din.bits
-    valid := io.din.valid
+    when(valid2){
+      data := data2
+      valid := valid2
+    }.elsewhen(ready){
+      data := io.din.bits
+      valid := io.din.valid
+    }.otherwise{
+      data := 0.U.asTypeOf((gen))
+      valid := false.B
+    }
+  }
+  ready := io.dout.ready
+
+  //din produce 1 without consumer
+  when(!io.dout.ready && ready ){
+    data2 := io.din.bits
+    valid2 := io.din.valid
+  }.elsewhen(io.dout.ready){
+    //consumer takes 1
+    data2 := 0.U.asTypeOf((gen))
+    valid2 := false.B
   }
 
-  io.din.ready := io.dout.ready
+  io.din.ready := ready
   io.dout.valid := valid
   io.dout.bits := data
 }

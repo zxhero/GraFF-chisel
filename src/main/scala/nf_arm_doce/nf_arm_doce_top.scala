@@ -16,6 +16,13 @@ class axisdata(AXIS_DATA_WIDTH: Int = 8, ELEMENT_WIDTH: Int = 1) extends Bundle 
   }
 }
 
+class axisdata_u(AXIS_DATA_WIDTH: Int = 8, AXIS_USER_WIDTH: Int = 4) extends Bundle {
+  val tdata = UInt((8 * AXIS_DATA_WIDTH).W)
+  val tkeep = UInt(AXIS_DATA_WIDTH.W)
+  val tlast = Bool()
+  val tuser = UInt(AXIS_USER_WIDTH.W)
+}
+
 class axiar(AXI_ADDR_WIDTH : Int = 44, AXI_ID_WIDTH: Int = 18, AXI_SIZE_WIDTH: Int = 3, NUM : Int = 1) extends Bundle {
   val araddr = (UInt((NUM * AXI_ADDR_WIDTH).W))
   val arid = (UInt((NUM * AXI_ID_WIDTH).W))

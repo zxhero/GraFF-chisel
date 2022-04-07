@@ -4,6 +4,7 @@ import chisel3._
 import numa.V2LLayer
 import bfs._
 import chisel3.util.Cat
+import doce.{aw_decode, aw_width_converter, rx_depacketing, tx_packeting}
 import remote._
 
 object TOPgen extends App {
@@ -27,8 +28,8 @@ class BFS_ps(AXI_ADDR_WIDTH : Int = 64, AXI_DATA_WIDTH: Int = 64, AXI_ID_WIDTH: 
     val config = new axilitedata(AXI_ADDR_WIDTH)
     val PLmemory = Vec(2, Flipped(new axidata(AXI_ADDR_WIDTH, AXI_DATA_WIDTH, AXI_ID_WIDTH + 1, AXI_SIZE_WIDTH)))
     val PSmemory = Vec(4, Flipped(new axidata(AXI_ADDR_WIDTH, 16, AXI_ID_WIDTH, AXI_SIZE_WIDTH)))
-    val Re_memory_out = Flipped(new axidata(AXI_ADDR_WIDTH, AXI_DATA_WIDTH, AXI_ID_WIDTH + 1, AXI_SIZE_WIDTH))
-    val Re_memory_in = new axidata(AXI_ADDR_WIDTH, AXI_DATA_WIDTH, AXI_ID_WIDTH + 1, AXI_SIZE_WIDTH)
+    val Re_memory_out = Flipped(new axidata(AXI_ADDR_WIDTH, AXI_DATA_WIDTH, AXI_ID_WIDTH, AXI_SIZE_WIDTH))
+    val Re_memory_in = new axidata(AXI_ADDR_WIDTH, AXI_DATA_WIDTH, AXI_ID_WIDTH + 4, AXI_SIZE_WIDTH)
   })
 
   val controls = Module(new controller(AXI_ADDR_WIDTH, 17,
@@ -95,8 +96,9 @@ class BFS_ps(AXI_ADDR_WIDTH : Int = 64, AXI_DATA_WIDTH: Int = 64, AXI_ID_WIDTH: 
   controls.io.traveled_edges := Scatters.map{i => i.io.traveled_edges}.reduce(_+_)
   controls.io.unvisited_size := MemController.io.unvisited_size + ReScatter.io.remote_unvisited_size
   controls.io.flush_cache_end := LevelCache.io.end
-  controls.io.signal_ack := MemController.io.signal_ack
+  controls.io.signal_ack := MemController.io.signal_ack && ReApply.io.signal_ack
   controls.io.fin.last := ReApply.io.end
+  controls.io.performance(0) := !ReApply.io.xbar_in.ready
   //Gathers.io.signal := controls.io.signal
   LevelCache.io.flush := controls.io.flush_cache
   LevelCache.io.level_base_addr := Cat(controls.io.data(6), controls.io.data(5))
@@ -134,4 +136,17 @@ class BFS_ps(AXI_ADDR_WIDTH : Int = 64, AXI_DATA_WIDTH: Int = 64, AXI_ID_WIDTH: 
 object BFSPSgen extends App {
   val verilogString = (new chisel3.stage.ChiselStage).emitVerilog(new BFS_ps(), args)
   //println(verilogString)
+}
+
+object DoCEgen extends App {
+  val rootdir = args(1)
+  args(1) = rootdir + "transaction_layer/"
+  print(args(1))
+  val verilogString = (new chisel3.stage.ChiselStage).emitVerilog(new aw_width_converter(W_Channel_Width=512+64, Dout_Width=512), args)
+  val verilogString2 = (new chisel3.stage.ChiselStage).emitVerilog(new aw_decode(W_Channel_Width=512+64, Din_Width=512), args)
+  //println(verilogString)
+  args(1) = rootdir + "transport_layer/"
+  print(args(1))
+  val verilogString3 = (new chisel3.stage.ChiselStage).emitVerilog(new tx_packeting(AXIS_DATA_WIDTH=64), args)
+  val verilogString4 = (new chisel3.stage.ChiselStage).emitVerilog(new rx_depacketing(AXIS_DATA_WIDTH=64), args)
 }

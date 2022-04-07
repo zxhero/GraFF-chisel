@@ -17,6 +17,7 @@ class Remote_Apply(AXI_ADDR_WIDTH : Int = 64, AXI_DATA_WIDTH: Int, AXI_ID_WIDTH:
     val recv_sync = Input(UInt(Local_Scatter_Num.W))
     val recv_sync_phase2 = Input(Bool())
     val signal = Input(Bool())
+    val signal_ack = Output(Bool())
     val local_fpga_id = Input(UInt(log2Ceil(FPGA_Num).W))
     val level_base_addr = Input(UInt(64.W))
     val local_unvisited_size = Input(UInt(32.W))
@@ -74,6 +75,7 @@ class Remote_Apply(AXI_ADDR_WIDTH : Int = 64, AXI_DATA_WIDTH: Int, AXI_ID_WIDTH:
   }.elsewhen(sync_status === sm.wait_signal && io.signal){
     sync_status := sm.idole
   }
+  io.signal_ack := sync_status === sm.wait_signal
 
   val need_to_send_sync = (sync_status === sm.output_fin_phase1) | (sync_status === sm.output_fin_phase2)
   vertex_in_fifo.io.s_axis_aclk := clock.asBool()
@@ -149,12 +151,18 @@ class Remote_Apply(AXI_ADDR_WIDTH : Int = 64, AXI_DATA_WIDTH: Int, AXI_ID_WIDTH:
   io.remote_out.w.bits.wdata := vertex_in_fifo.io.m_axis.tdata
   io.remote_out.w.bits.wstrb := VecInit(vids_to_dest(vertex_in_fifo.io.m_axis.tdata.asTypeOf(Vec(AXIS_DATA_WIDTH / 4, UInt(32.W))),
     dest_grant, vertex_in_fifo.io.m_axis.tkeep(AXIS_DATA_WIDTH / 4 - 1, 0).asBools())).asUInt()
+
+  val packet_sent = RegInit(0.U(32.W))
+  dontTouch(packet_sent)
+  when(io.remote_out.aw.valid && io.remote_out.aw.ready){
+    packet_sent := packet_sent + 1.U
+  }
 }
 
 class Remote_Scatter(AXI_ADDR_WIDTH : Int = 64, AXI_DATA_WIDTH: Int, AXI_ID_WIDTH: Int = 6, AXI_SIZE_WIDTH: Int = 3,
                      AXIS_DATA_WIDTH : Int, FPGA_Num: Int) extends Module {
   val io = IO(new Bundle() {
-    val remote_in = new axidata(AXI_ADDR_WIDTH, AXI_DATA_WIDTH, AXI_ID_WIDTH, AXI_SIZE_WIDTH)
+    val remote_in = new axidata(AXI_ADDR_WIDTH, AXI_DATA_WIDTH, AXI_ID_WIDTH + 4, AXI_SIZE_WIDTH)
     val xbar_out = Decoupled(new axisdata(AXIS_DATA_WIDTH, 4))
 
     //control path
@@ -186,7 +194,7 @@ class Remote_Scatter(AXI_ADDR_WIDTH : Int = 64, AXI_DATA_WIDTH: Int, AXI_ID_WIDT
   io.issue_sync_phase2 := sync === (FPGA_Num - 1).U
   when(is_sync){
     sync := sync + 1.U
-  }.elsewhen(io.start || io.signal){
+  }.elsewhen(!io.start && io.signal){
     sync := 0.U
   }
   vertex_in_fifo.io.m_axis.connectto(io.xbar_out.bits, 0)
@@ -202,22 +210,19 @@ class Remote_Scatter(AXI_ADDR_WIDTH : Int = 64, AXI_DATA_WIDTH: Int, AXI_ID_WIDT
   val unvisited_size_reg = RegInit(0.U(32.W))
   when(is_sync){
     unvisited_size_reg := unvisited_size_reg + vertex_in_fifo.io.m_axis.tdata(30, 0)
-  }.elsewhen(io.start || io.signal){
+  }.elsewhen(!io.start && io.signal){
     unvisited_size_reg := 0.U
   }
   io.remote_unvisited_size := unvisited_size_reg
 
-  val channel_b_count = RegInit(0.U(32.W))
-  when(io.remote_in.w.valid && io.remote_in.w.ready &&
-    io.remote_in.b.valid && io.remote_in.b.ready){
-    channel_b_count := channel_b_count
-  }.elsewhen(io.remote_in.w.valid && io.remote_in.w.ready){
-    channel_b_count := channel_b_count + 1.U
-  }.elsewhen(io.remote_in.b.valid && io.remote_in.b.ready){
-    channel_b_count := channel_b_count - 1.U
-  }
-  io.remote_in.b.valid := channel_b_count =/= 0.U
   io.remote_in.b.bits.tie_off()
+  io.remote_in.b.valid := false.B
+
+  val packet_recv = RegInit(0.U(32.W))
+  dontTouch(packet_recv)
+  when(io.remote_in.w.valid && io.remote_in.w.ready){
+    packet_recv := packet_recv + 1.U
+  }
 }
 
 class Remote_xbar(AXIS_DATA_WIDTH: Int, SLAVE_NUM: Int, MASTER_NUM: Int) extends Module {

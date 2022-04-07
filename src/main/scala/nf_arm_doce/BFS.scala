@@ -5,7 +5,6 @@ import chisel3.experimental.ChiselEnum
 import nf_arm_doce._
 import chisel3.util._
 import utils._
-import numa.LookupTable
 
 //TODO: rename to cache
 class WB_engine(AXI_ADDR_WIDTH : Int = 64, AXI_DATA_WIDTH: Int = 64, AXI_ID_WIDTH: Int = 6, AXI_SIZE_WIDTH: Int = 3) extends Module{
@@ -1081,6 +1080,7 @@ class controller (AXI_ADDR_WIDTH : Int = 64, Scatter_num : Int, RegName : Map[St
     val flush_cache = Output(Bool())
     val flush_cache_end = Input(Bool())
     val signal_ack = Input(Bool())
+    val performance = Input(Vec(1, Bool()))
   })
 
   def GetRegByName(name : String): UInt = {
@@ -1114,7 +1114,7 @@ class controller (AXI_ADDR_WIDTH : Int = 64, Scatter_num : Int, RegName : Map[St
     val write_clock = Value(0x6.U)
   }
   val status = RegInit(sm.idole)
-  val start = controls.io.data(0)(0)
+  val start = controls.io.data(0)(0) && !controls.io.data(0)(1)
   val FIN = RegInit(VecInit(Seq.fill(Scatter_num)(false.B)))
   val new_tep = Cat(controls.io.data(12), controls.io.data(13)) + io.traveled_edges
   val counterValue = RegInit(0.U(64.W))
@@ -1154,16 +1154,16 @@ class controller (AXI_ADDR_WIDTH : Int = 64, Scatter_num : Int, RegName : Map[St
     status := sm.end
   }.elsewhen(status === sm.write_clock){
     status := sm.flush_cache
-  }.elsewhen(status === sm.end){
+  }/*.elsewhen(status === sm.end){
     status := sm.idole
-  }
+  }*/
 
   FIN.zipWithIndex.map{
     case(f, i) => {
-      when(io.fin(i)){
-        f := true.B
-      }.elsewhen(io.signal){
+      when(io.signal){
         f := false.B
+      }.elsewhen(io.fin(i)){
+        f := true.B
       }
     }
   }
@@ -1181,7 +1181,19 @@ class controller (AXI_ADDR_WIDTH : Int = 64, Scatter_num : Int, RegName : Map[St
     counterValue := counterValue + 1.U
   }
 
-  io.signal := status === sm.start || status === sm.fin
+  val performanceValue = RegInit(VecInit(Seq.fill(1)(0.U(64.W))))
+  dontTouch(performanceValue)
+  io.performance.zipWithIndex.map{
+    case (p, i) => {
+      when(global_start) {
+        performanceValue(i) := 0.U
+      }.elsewhen(p){
+        performanceValue(i) := performanceValue(i) + 1.U
+      }
+    }
+  }
+
+  io.signal := status === sm.start || (status === sm.fin && io.unvisited_size =/= 0.U)
   io.data := controls.io.data
   io.level := level
   io.start := status === sm.start
