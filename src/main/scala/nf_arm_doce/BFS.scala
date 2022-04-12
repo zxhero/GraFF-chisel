@@ -383,7 +383,6 @@ class readEdge_engine(AXI_ADDR_WIDTH : Int = 64, AXI_DATA_WIDTH: Int, AXI_ID_WID
   edge_read_buffer.io.wr_en := !get_flag(io.in.bits.rid) & io.in.valid &
     (get_edge_count(io.in.bits.rdata) > EMBEDDING.asUInt()) & (transaction_start === false.B)
   io.in.ready := edge_read_buffer.io.full === false.B
-  io.read_edge_fifo_empty := edge_read_buffer.is_empty()
 
   val remainning_edges = (get_edge_count(edge_read_buffer.io.dout) - EMBEDDING.asUInt())
   object cache_sm extends ChiselEnum {
@@ -432,6 +431,7 @@ class readEdge_engine(AXI_ADDR_WIDTH : Int = 64, AXI_DATA_WIDTH: Int, AXI_ID_WID
 
   edge_read_buffer.io.rd_en := io.out.ready & cache_status === cache_sm.idole && io.inflight_vtxs < 32.U
   io.read_edge_num := num_vertex
+  io.read_edge_fifo_empty := edge_read_buffer.is_empty() && cache_status === cache_sm.idole
 }
 
 class Broadcast(AXI_ADDR_WIDTH : Int = 64, AXI_DATA_WIDTH: Int, AXI_ID_WIDTH: Int = 6, AXI_SIZE_WIDTH: Int = 3,
@@ -729,25 +729,29 @@ class Scatter(AXIS_DATA_WIDTH: Int = 4, SID: Int, AXI_DATA_WIDTH: Int,
     }
   }
 
-  arbi.io.xbar_in.bits.tkeep := filtered_keep.asUInt()
-  arbi.io.xbar_in.bits.tdata := io.xbar_in.bits.tdata
-  arbi.io.xbar_in.valid := io.xbar_in.valid
-  arbi.io.xbar_in.bits.tlast := io.xbar_in.bits.tlast
-  io.xbar_in.ready := arbi.io.xbar_in.ready
+  val vertex_in_fifo = Module(new axis_data_fifo(128, "vid_32_fifo"))
+  vertex_in_fifo.io.s_axis_aclk := clock.asBool()
+  vertex_in_fifo.io.s_axis_aresetn := !reset.asBool()
+  vertex_in_fifo.io.s_axis.tdata := io.xbar_in.bits.tdata
+  vertex_in_fifo.io.s_axis.tlast := io.xbar_in.bits.tlast
+  vertex_in_fifo.io.s_axis.tvalid := io.xbar_in.valid
+  vertex_in_fifo.io.s_axis.tkeep := filtered_keep.asUInt()
+  io.xbar_in.ready := vertex_in_fifo.io.s_axis.tready
 
-  val vertex_in_fifo = Module(new BRAM_fifo(32, 32, "vid_fifo"))
+  vertex_in_fifo.io.m_axis.connectto(arbi.io.xbar_in.bits, 0)
+  arbi.io.xbar_in.valid := vertex_in_fifo.io.m_axis.tvalid
+  vertex_in_fifo.io.m_axis.tready := arbi.io.xbar_in.ready
+
   val vertex_out_fifo = Module(new BRAM_fifo(32, 32, "vid_fifo"))
-  vertex_in_fifo.io.clk := clock.asBool()
-  vertex_in_fifo.io.srst := reset.asBool()
   vertex_out_fifo.io.clk := clock.asBool()
   vertex_out_fifo.io.srst := reset.asBool()
 
   //read or write bitmap ehnr this is not FIN
-  val bitmap_arvalid = vertex_in_fifo.is_valid()
+  val bitmap_arvalid = arbi.io.ddr_out.valid
   val halt = vertex_out_fifo.io.full === true.B
   val bitmap_wait = Module(new pipeline(UInt(32.W)))
   bitmap_wait.io.din.valid := bitmap_arvalid
-  bitmap_wait.io.din.bits := vertex_in_fifo.io.dout
+  bitmap_wait.io.din.bits := arbi.io.ddr_out.bits.tdata
   bitmap_wait.io.dout.ready := !halt
   val bitmap_doutb = Wire(UInt(9.W))
   val bitmap_write_addr = Module(new pipeline(UInt(32.W)))
@@ -762,7 +766,7 @@ class Scatter(AXIS_DATA_WIDTH: Int = 4, SID: Int, AXI_DATA_WIDTH: Int,
   bitmap_write_data.io.dout.ready := !halt
   val bitmap_write_data_forward = Module(new pipeline(UInt(9.W)))
   bitmap_write_data_forward.io.din.valid := bitmap_write_addr.io.dout.valid && bitmap_arvalid &&
-    (vid2bitmap_addr(vertex_in_fifo.io.dout) === vid2bitmap_addr(bitmap_write_addr.io.dout.bits))
+    (vid2bitmap_addr(arbi.io.ddr_out.bits.tdata) === vid2bitmap_addr(bitmap_write_addr.io.dout.bits))
   bitmap_write_data_forward.io.din.bits := bitmap_write_data.io.dout.bits
   bitmap_write_data_forward.io.dout.ready := !halt
   bitmap_doutb := MuxCase(bitmap.io.doutb, Array(
@@ -771,13 +775,10 @@ class Scatter(AXIS_DATA_WIDTH: Int = 4, SID: Int, AXI_DATA_WIDTH: Int,
     bitmap_write_data_forward.io.dout.valid -> bitmap_write_data_forward.io.dout.bits
   ))
 
-  vertex_in_fifo.io.din := arbi.io.ddr_out.bits.tdata
-  vertex_in_fifo.io.wr_en := arbi.io.ddr_out.valid
-  arbi.io.ddr_out.ready := vertex_in_fifo.io.full === false.B
+  arbi.io.ddr_out.ready := !halt
   bitmap.io.enb :=  true.B//bitmap_arvalid
-  bitmap.io.addrb := vid2bitmap_addr(vertex_in_fifo.io.dout)
+  bitmap.io.addrb := vid2bitmap_addr(arbi.io.ddr_out.bits.tdata)
   bitmap.io.clkb := clock.asBool()
-  vertex_in_fifo.io.rd_en := !halt
   vertex_out_fifo.io.wr_en := bitmap_write_addr.io.dout.valid
   vertex_out_fifo.io.din := bitmap_write_addr.io.dout.bits
   bitmap.io.ena := true.B
@@ -793,6 +794,12 @@ class Scatter(AXIS_DATA_WIDTH: Int = 4, SID: Int, AXI_DATA_WIDTH: Int,
 
   //control path
   io.end := vertex_out_fifo.test_FIN()
+
+  val ready_counter = RegInit(0.U(32.W))
+  dontTouch(ready_counter)
+  when(io.xbar_in.ready === false.B && io.xbar_in.valid === true.B){
+    ready_counter := ready_counter + 1.U
+  }
 }
 
 //TODO: Try to use fifoIO
@@ -877,6 +884,12 @@ class multi_channel_fifo(AXI_DATA_WIDTH: Int = 64, size : Int = 16, val Scatter_
   io.out.dout := collector_data.asUInt()
   io.out.data_count := collector_fifos.map{i => i.io.data_count.asTypeOf(UInt((log2Ceil(size * AXI_DATA_WIDTH / 4) + 1).W))}.reduce(_+_)
   io.out.full := ~fifos_ready
+
+  val ready_counter = RegInit(0.U(32.W))
+  dontTouch(ready_counter)
+  when(fifos_ready === false.B && in_pipeline.map{x => x.io.dout.valid}.reduce(_|_)){
+    ready_counter := ready_counter + 1.U
+  }
 }
 
 /*

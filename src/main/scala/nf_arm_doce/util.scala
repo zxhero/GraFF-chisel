@@ -354,3 +354,15 @@ class AMBA_Arbiter[T <: Data](val gen: T, val n: Int) extends Module {
   io.out.valid := Mux(status === sm.idole, !grant.last || io.in.last.valid, !grant_reg.last || io.in.last.valid)
 
 }
+
+class axis_reg_slice(AXIS_DATA_WIDTH: Int, val mname : String) extends BlackBox{
+  val io = IO(new Bundle() {
+    val aclk = Input(Bool())
+    val aresetn = Input(Bool())
+    val s_axis = new streamdata_blackbox(AXIS_DATA_WIDTH, 1, 1)
+    val m_axis = Flipped(new streamdata_blackbox(AXIS_DATA_WIDTH, 1, 1))
+
+  })
+
+  override def desiredName = mname
+}

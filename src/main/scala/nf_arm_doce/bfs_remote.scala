@@ -6,6 +6,126 @@ import chisel3.util.{Cat, Decoupled, MuxCase, log2Ceil}
 import nf_arm_doce.{axidata, axisdata}
 import utils._
 
+//compressed multiple sparse 512 bit axis data to 1 axis data
+class axis_data_collector(AXIS_DATA_WIDTH : Int) extends Module   {
+  val io = IO(new Bundle() {
+    val in = Flipped(Decoupled(new axisdata(AXIS_DATA_WIDTH, 4)))
+    val out = Decoupled(new axisdata(AXIS_DATA_WIDTH, 4))
+
+    val flush = Input(Bool())
+    val empty = Output(Bool())
+  })
+
+  val in = Module(new axis_reg_slice(AXIS_DATA_WIDTH, "collector_reg"))
+  in.io.aclk := clock.asBool()
+  in.io.aresetn := ~reset.asBool()
+  in.io.s_axis.tvalid := io.in.valid
+  in.io.s_axis.connectfrom(io.in.bits)
+  io.in.ready := in.io.s_axis.tready
+  val in_data = VecInit(Seq.fill(AXIS_DATA_WIDTH/4)(0.U.asTypeOf(new axisdata(4, 4))))
+  val in_count = (Seq.tabulate(AXIS_DATA_WIDTH/4)(
+    i => {
+      Seq.tabulate(i + 1)(x => (in.io.m_axis.tkeep(AXIS_DATA_WIDTH/4-1, 0).asBools()(x) && in.io.m_axis.tvalid.asBool()).asTypeOf(UInt(8.W))).reduce(_+_)
+    }
+  ))
+  in_data.zipWithIndex.map{
+    case (d, i) => {
+      print(i)
+      d.tdata := MuxCase(0.U, Seq.tabulate(AXIS_DATA_WIDTH/4 - i)(
+        x => ((i.U(8.W) + 1.U(8.W)) === in_count(x + i)) -> in.io.m_axis.tdata(((x + i) + 1) * 32 - 1, (x + i) * 32))
+      )
+      d.tkeep := MuxCase(0.U, Seq.tabulate(AXIS_DATA_WIDTH/4 - i)(
+        x => ((i.U(8.W) + 1.U(8.W)) === in_count(x + i)) -> in.io.m_axis.tkeep(x + i))
+      )
+    }
+  }
+
+  val mid = Module(new axis_reg_slice(AXIS_DATA_WIDTH, "collector_reg"))
+  mid.io.aclk := clock.asBool()
+  mid.io.aresetn := ~reset.asBool()
+  val mid_count = RegInit(0.U(32.W))
+  val total_count = mid_count + in_count.last
+  val mid_data = VecInit(Seq.fill(AXIS_DATA_WIDTH/4)(0.U.asTypeOf(new axisdata(4, 4))))
+  mid_data.zipWithIndex.map{
+    case(d, i) => {
+      d.tdata := mid.io.m_axis.tdata((i + 1) * 32 - 1, i * 32)
+      d.tkeep := mid.io.m_axis.tkeep(i)
+      when(i.U >= mid_count){
+        d.tdata := MuxCase(0.U, Seq.tabulate(AXIS_DATA_WIDTH/4)(
+          x => (x.U === (i.U - mid_count)) -> in_data(x).tdata
+        ))
+        d.tkeep := MuxCase(0.U, Seq.tabulate(AXIS_DATA_WIDTH/4)(
+          x => (x.U === (i.U - mid_count)) -> in_data(x).tkeep
+        ))
+      }
+    }
+  }
+
+  val out = Module(new axis_reg_slice(AXIS_DATA_WIDTH, "collector_reg"))
+  out.io.aclk := clock.asBool()
+  out.io.aresetn := ~reset.asBool()
+  out.io.m_axis.tready := io.out.ready
+  out.io.m_axis.connectto(io.out.bits, 0)
+  io.out.valid := out.io.m_axis.tvalid
+  out.io.s_axis.tvalid := false.B
+  out.io.s_axis.tkeep := 0.U
+  out.io.s_axis.tdata := 0.U
+  when(mid.io.m_axis.tvalid.asBool()){
+    when((total_count >= 16.U)
+    || io.flush){
+      out.io.s_axis.tvalid := true.B
+      out.io.s_axis.tkeep := VecInit(mid_data.map(x=>x.tkeep)).asUInt()
+      out.io.s_axis.tdata := VecInit(mid_data.map(x => x.tdata)).asUInt()
+    }
+  }
+  out.io.s_axis.tlast := true.B
+
+  //consumed by out or updated by in
+  mid.io.m_axis.tready := (out.io.s_axis.tready & out.io.s_axis.tvalid) | (mid.io.s_axis.tvalid & (total_count < 16.U))
+  mid.io.s_axis.tvalid := in.io.m_axis.tvalid.asBool() && in_count.last > 0.U
+  mid.io.s_axis.tdata := 0.U
+  mid.io.s_axis.tkeep := 0.U
+  when(mid.io.s_axis.tvalid.asBool()){
+    when(mid.io.m_axis.tvalid.asBool()){
+      when(out.io.s_axis.tvalid.asBool()){
+        val in_data_left = VecInit(Seq.fill(AXIS_DATA_WIDTH/4)(0.U.asTypeOf(new axisdata(4, 4))))
+        in_data_left.zipWithIndex.map{
+          case (d, i) => {
+            d.tdata := MuxCase(0.U, Seq.tabulate(AXIS_DATA_WIDTH/4)(
+              x => ((i.U(8.W) + 16.U(8.W) - mid_count) === x.U) -> in_data(x).tdata)
+            )
+            d.tkeep := MuxCase(0.U, Seq.tabulate(AXIS_DATA_WIDTH/4)(
+              x => ((i.U(8.W) + 16.U(8.W) - mid_count) === x.U) -> in_data(x).tkeep)
+            )
+          }
+        }
+        mid.io.s_axis.tdata := VecInit(in_data_left.map(x=>x.tdata)).asUInt()
+        mid.io.s_axis.tkeep := VecInit(in_data_left.map(x=>x.tkeep)).asUInt()
+      }.otherwise{
+        mid.io.s_axis.tdata := VecInit(mid_data.map(x=>x.tdata)).asUInt()
+        mid.io.s_axis.tkeep := VecInit(mid_data.map(x=>x.tkeep)).asUInt()
+      }
+    }.otherwise{
+      mid.io.s_axis.tdata := VecInit(in_data.map(x=>x.tdata)).asUInt()
+      mid.io.s_axis.tkeep := VecInit(in_data.map(x=>x.tkeep)).asUInt()
+    }
+  }
+  when(mid.io.s_axis.tvalid.asBool() && mid.io.s_axis.tready.asBool()){
+    when(mid_count === 0.U){
+      mid_count := in_count.last
+    }.elsewhen(total_count >= 16.U){
+      mid_count := (total_count - 16.U)
+    }.otherwise{
+      mid_count := total_count
+    }
+  }.elsewhen(out.io.s_axis.tvalid.asBool() && out.io.s_axis.tready.asBool()){
+    mid_count := 0.U
+  }
+
+  in.io.m_axis.tready := mid.io.s_axis.tready | in_count.last === 0.U
+  io.empty := (in.io.m_axis.tvalid | mid.io.m_axis.tvalid | out.io.m_axis.tvalid) === false.B
+}
+
 class Remote_Apply(AXI_ADDR_WIDTH : Int = 64, AXI_DATA_WIDTH: Int, AXI_ID_WIDTH: Int = 6, AXI_SIZE_WIDTH: Int = 3,
                    AXIS_DATA_WIDTH: Int,
                    Local_Scatter_Num: Int, FPGA_Num: Int, Local_Apply_Num : Int) extends Module {
@@ -51,6 +171,13 @@ class Remote_Apply(AXI_ADDR_WIDTH : Int = 64, AXI_DATA_WIDTH: Int, AXI_ID_WIDTH:
     }
   }
 
+  val collector = Module(new axis_data_collector(64))
+  collector.io.in.valid := io.xbar_in.valid
+  collector.io.in.bits.tkeep := filtered_keep.asUInt()
+  collector.io.in.bits.tdata := io.xbar_in.bits.tdata
+  collector.io.in.bits.tlast := true.B
+  io.xbar_in.ready := collector.io.in.ready
+
   val vertex_in_fifo = Module(new axis_data_fifo(AXIS_DATA_WIDTH, "remote_vid_fifo"))
   object sm extends ChiselEnum {
     val idole = Value(0x0.U)
@@ -61,14 +188,27 @@ class Remote_Apply(AXI_ADDR_WIDTH : Int = 64, AXI_DATA_WIDTH: Int, AXI_ID_WIDTH:
     val wait_sync_phase1 = Value(0x5.U)
     val output_fin_phase2 = Value(0x6.U)
     val wait_signal = Value(0x7.U)
+    val flush = Value(0x8.U)
+    val wait_data_flow = Value(0x9.U)
   }
   val sync_data = "x80000000".asUInt(AXIS_DATA_WIDTH.W) + io.local_unvisited_size
   val sync_status = RegInit(sm.idole)
+  val stall_time = RegInit(0.U(32.W))
+  //stall until the local unvisited size is updated
+  when(sync_status === sm.wait_data_flow){
+    stall_time := stall_time + 1.U
+  }.otherwise{
+    stall_time := 0.U
+  }
   when(sync_status === sm.idole && io.recv_sync.andR()) {
+    sync_status := sm.flush
+  }.elsewhen(sync_status === sm.flush && collector.io.empty){
     sync_status := sm.output_fin_phase1
   }.elsewhen(sync_status === sm.output_fin_phase1 && vertex_in_fifo.io.s_axis.tready.asBool()){
     sync_status := sm.wait_sync_phase1
   }.elsewhen(sync_status === sm.wait_sync_phase1 && io.recv_sync_phase2){
+    sync_status := sm.wait_data_flow
+  }.elsewhen(sync_status === sm.wait_data_flow && stall_time === 8.U){
     sync_status := sm.output_fin_phase2
   }.elsewhen(sync_status === sm.output_fin_phase2 && vertex_in_fifo.io.s_axis.tready.asBool()){
     sync_status := sm.wait_signal
@@ -76,16 +216,17 @@ class Remote_Apply(AXI_ADDR_WIDTH : Int = 64, AXI_DATA_WIDTH: Int, AXI_ID_WIDTH:
     sync_status := sm.idole
   }
   io.signal_ack := sync_status === sm.wait_signal
+  collector.io.flush := sync_status === sm.flush
 
   val need_to_send_sync = (sync_status === sm.output_fin_phase1) | (sync_status === sm.output_fin_phase2)
   vertex_in_fifo.io.s_axis_aclk := clock.asBool()
   vertex_in_fifo.io.s_axis_aresetn := ~reset.asBool()
-  vertex_in_fifo.io.s_axis.tvalid := (io.xbar_in.valid) | need_to_send_sync
+  vertex_in_fifo.io.s_axis.tvalid := (collector.io.out.valid) | need_to_send_sync
   vertex_in_fifo.io.s_axis.tid := 0.U
-  vertex_in_fifo.io.s_axis.tkeep := Mux(need_to_send_sync, 1.U, filtered_keep.asUInt())
+  vertex_in_fifo.io.s_axis.tkeep := Mux(need_to_send_sync, 1.U, collector.io.out.bits.tkeep)
   vertex_in_fifo.io.s_axis.tlast := 1.U
-  vertex_in_fifo.io.s_axis.tdata := Mux(need_to_send_sync, sync_data, io.xbar_in.bits.tdata)
-  io.xbar_in.ready := vertex_in_fifo.io.s_axis.tready
+  vertex_in_fifo.io.s_axis.tdata := Mux(need_to_send_sync, sync_data, collector.io.out.bits.tdata)
+  collector.io.out.ready := vertex_in_fifo.io.s_axis.tready
   io.end := sync_status === sm.output_fin_phase2 && vertex_in_fifo.io.s_axis.tready.asBool()
 
   //which and how many remote dest to be sent
@@ -222,6 +363,12 @@ class Remote_Scatter(AXI_ADDR_WIDTH : Int = 64, AXI_DATA_WIDTH: Int, AXI_ID_WIDT
   dontTouch(packet_recv)
   when(io.remote_in.w.valid && io.remote_in.w.ready){
     packet_recv := packet_recv + 1.U
+  }
+
+  val ready_counter = RegInit(0.U(32.W))
+  dontTouch(ready_counter)
+  when(io.remote_in.w.valid && io.remote_in.w.ready === false.B){
+    ready_counter := ready_counter + 1.U
   }
 }
 
