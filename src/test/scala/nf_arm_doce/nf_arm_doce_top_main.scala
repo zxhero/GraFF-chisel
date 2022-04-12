@@ -99,14 +99,13 @@ class BFS_ps(AXI_ADDR_WIDTH : Int = 64, AXI_DATA_WIDTH: Int = 64, AXI_ID_WIDTH: 
   controls.io.signal_ack := MemController.io.signal_ack && ReApply.io.signal_ack
   controls.io.fin.last := ReApply.io.end
   controls.io.performance(0) := !ReApply.io.xbar_in.ready
-  //Gathers.io.signal := controls.io.signal
   LevelCache.io.flush := controls.io.flush_cache
   LevelCache.io.level_base_addr := Cat(controls.io.data(6), controls.io.data(5))
   LevelCache.io.level := controls.io.level
   Scatters.zipWithIndex.map{
     case(b, i) => {
       b.io.root := controls.io.data(7)
-      b.io.signal := controls.io.signal
+      b.io.signal := (controls.io.signal && controls.io.signal_ack) | controls.io.start
       b.io.embedding_base_addr := Cat(controls.io.data(2), controls.io.data(1))
       b.io.edge_base_addr := Cat(controls.io.data(4), controls.io.data(3))
       if(i == 0){
@@ -119,18 +118,18 @@ class BFS_ps(AXI_ADDR_WIDTH : Int = 64, AXI_DATA_WIDTH: Int = 64, AXI_ID_WIDTH: 
   }
   MemController.io.tiers_base_addr(0) := Cat(controls.io.data(9), controls.io.data(8))
   MemController.io.tiers_base_addr(1) := Cat(controls.io.data(11), controls.io.data(10))
-  MemController.io.signal := controls.io.signal
+  MemController.io.signal := controls.io.signal && controls.io.signal_ack
   MemController.io.start := controls.io.start
   MemController.io.end := controls.io.data(0)(1)
   ReApply.io.recv_sync := VecInit(Scatters.map{i => i.io.issue_sync}).asUInt()
   ReApply.io.local_fpga_id := controls.GetRegByName("fpga_id")
   ReApply.io.level_base_addr := Cat(controls.GetRegByName("Rlevel_hi"), controls.GetRegByName("Rlevel_lo"))
-  ReApply.io.signal := controls.io.signal
+  ReApply.io.signal := controls.io.signal && controls.io.signal_ack
   ReApply.io.local_unvisited_size := MemController.io.unvisited_size
   ReApply.io.recv_sync_phase2 := ReScatter.io.issue_sync_phase2
   Applys.map{x => x.io.local_fpga_id := controls.GetRegByName("fpga_id")}
   ReScatter.io.start := controls.io.start
-  ReScatter.io.signal := controls.io.signal
+  ReScatter.io.signal := controls.io.signal && controls.io.signal_ack
 }
 
 object BFSPSgen extends App {
