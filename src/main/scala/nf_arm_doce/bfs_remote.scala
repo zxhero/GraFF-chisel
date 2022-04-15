@@ -7,7 +7,7 @@ import nf_arm_doce.{axidata, axisdata}
 import utils._
 
 //compressed multiple sparse 512 bit axis data to 1 axis data
-class axis_data_collector(AXIS_DATA_WIDTH : Int) extends Module   {
+class axis_data_collector(AXIS_DATA_WIDTH : Int = 64) extends Module   {
   val io = IO(new Bundle() {
     val in = Flipped(Decoupled(new axisdata(AXIS_DATA_WIDTH, 4)))
     val out = Decoupled(new axisdata(AXIS_DATA_WIDTH, 4))
@@ -40,23 +40,45 @@ class axis_data_collector(AXIS_DATA_WIDTH : Int) extends Module   {
     }
   }
 
-  val mid = Module(new axis_reg_slice(AXIS_DATA_WIDTH, "collector_reg"))
+  val sorted_in = Module(new axis_reg_slice(AXIS_DATA_WIDTH, "collector_reg"))
+  sorted_in.io.aclk := clock.asBool()
+  sorted_in.io.aresetn := ~reset.asBool()
+  sorted_in.io.s_axis.tvalid := in.io.m_axis.tvalid & in_count.last > 0.U
+  sorted_in.io.s_axis.tkeep := VecInit(in_data.map(x=>x.tkeep)).asUInt()
+  sorted_in.io.s_axis.tdata := VecInit(in_data.map(x=>x.tdata)).asUInt()
+  in.io.m_axis.tready := sorted_in.io.s_axis.tready | in_count.last === 0.U
+  val in_count_reg = RegInit(0.U(32.W))
+  when((sorted_in.io.s_axis.tvalid & sorted_in.io.s_axis.tready).asBool()){
+    in_count_reg := in_count.last
+  }
+
+  val mid = Module(new axis_reg_slice(AXIS_DATA_WIDTH*2, "collector_mid_reg"))
   mid.io.aclk := clock.asBool()
   mid.io.aresetn := ~reset.asBool()
   val mid_count = RegInit(0.U(32.W))
-  val total_count = mid_count + in_count.last
-  val mid_data = VecInit(Seq.fill(AXIS_DATA_WIDTH/4)(0.U.asTypeOf(new axisdata(4, 4))))
-  mid_data.zipWithIndex.map{
+  //val total_count = mid_count + in_count.last
+  val mid_data_in = VecInit(Seq.fill(AXIS_DATA_WIDTH*3/4)(0.U.asTypeOf(new axisdata(4, 4))))
+  mid_data_in.zipWithIndex.map{
     case(d, i) => {
-      d.tdata := mid.io.m_axis.tdata((i + 1) * 32 - 1, i * 32)
-      d.tkeep := mid.io.m_axis.tkeep(i)
+      if(i < 32){
+        d.tdata := mid.io.m_axis.tdata((i + 1) * 32 - 1, i * 32)
+        d.tkeep := mid.io.m_axis.tkeep(i)
+      }else{
+        d.tdata := 0.U
+        d.tkeep := 0.U
+      }
       when(i.U >= mid_count){
-        d.tdata := MuxCase(0.U, Seq.tabulate(AXIS_DATA_WIDTH/4)(
-          x => (x.U === (i.U - mid_count)) -> in_data(x).tdata
-        ))
-        d.tkeep := MuxCase(0.U, Seq.tabulate(AXIS_DATA_WIDTH/4)(
-          x => (x.U === (i.U - mid_count)) -> in_data(x).tkeep
-        ))
+        when((i.U - mid_count) < 16.U){
+          d.tdata := MuxCase(0.U, Seq.tabulate(AXIS_DATA_WIDTH/4)(
+            x => (x.U === (i.U - mid_count)) -> sorted_in.io.m_axis.tdata((x + 1) * 32 - 1, x * 32)
+          ))
+          d.tkeep := MuxCase(0.U, Seq.tabulate(AXIS_DATA_WIDTH/4)(
+            x => (x.U === (i.U - mid_count)) -> sorted_in.io.m_axis.tkeep(x)
+          ))
+        }.otherwise{
+          d.tdata := 0.U
+          d.tkeep := 0.U
+        }
       }
     }
   }
@@ -71,59 +93,54 @@ class axis_data_collector(AXIS_DATA_WIDTH : Int) extends Module   {
   out.io.s_axis.tkeep := 0.U
   out.io.s_axis.tdata := 0.U
   when(mid.io.m_axis.tvalid.asBool()){
-    when((total_count >= 16.U)
+    when((mid_count >= 16.U)
     || io.flush){
       out.io.s_axis.tvalid := true.B
-      out.io.s_axis.tkeep := VecInit(mid_data.map(x=>x.tkeep)).asUInt()
-      out.io.s_axis.tdata := VecInit(mid_data.map(x => x.tdata)).asUInt()
+      out.io.s_axis.tkeep := mid.io.m_axis.tkeep(AXIS_DATA_WIDTH/4-1, 0)
+      out.io.s_axis.tdata := mid.io.m_axis.tdata(AXIS_DATA_WIDTH*8-1, 0)
     }
   }
   out.io.s_axis.tlast := true.B
 
   //consumed by out or updated by in
-  mid.io.m_axis.tready := (out.io.s_axis.tready & out.io.s_axis.tvalid) | (mid.io.s_axis.tvalid & (total_count < 16.U))
-  mid.io.s_axis.tvalid := in.io.m_axis.tvalid.asBool() && in_count.last > 0.U
+  mid.io.m_axis.tready := (out.io.s_axis.tready & out.io.s_axis.tvalid) | (mid.io.s_axis.tvalid & (mid_count < 16.U))
+  mid.io.s_axis.tvalid := sorted_in.io.m_axis.tvalid.asBool() |
+    (out.io.s_axis.tready & out.io.s_axis.tvalid & mid_count > 16.U)
   mid.io.s_axis.tdata := 0.U
   mid.io.s_axis.tkeep := 0.U
   when(mid.io.s_axis.tvalid.asBool()){
     when(mid.io.m_axis.tvalid.asBool()){
       when(out.io.s_axis.tvalid.asBool()){
-        val in_data_left = VecInit(Seq.fill(AXIS_DATA_WIDTH/4)(0.U.asTypeOf(new axisdata(4, 4))))
-        in_data_left.zipWithIndex.map{
-          case (d, i) => {
-            d.tdata := MuxCase(0.U, Seq.tabulate(AXIS_DATA_WIDTH/4)(
-              x => ((i.U(8.W) + 16.U(8.W) - mid_count) === x.U) -> in_data(x).tdata)
-            )
-            d.tkeep := MuxCase(0.U, Seq.tabulate(AXIS_DATA_WIDTH/4)(
-              x => ((i.U(8.W) + 16.U(8.W) - mid_count) === x.U) -> in_data(x).tkeep)
-            )
-          }
-        }
-        mid.io.s_axis.tdata := VecInit(in_data_left.map(x=>x.tdata)).asUInt()
-        mid.io.s_axis.tkeep := VecInit(in_data_left.map(x=>x.tkeep)).asUInt()
+        mid.io.s_axis.tdata := VecInit(Seq.tabulate(32)(i => mid_data_in(i+16).tdata)).asUInt()
+        mid.io.s_axis.tkeep := VecInit(Seq.tabulate(32)(i => mid_data_in(i+16).tkeep)).asUInt()
       }.otherwise{
-        mid.io.s_axis.tdata := VecInit(mid_data.map(x=>x.tdata)).asUInt()
-        mid.io.s_axis.tkeep := VecInit(mid_data.map(x=>x.tkeep)).asUInt()
+        mid.io.s_axis.tdata := VecInit(mid_data_in.map(x=>x.tdata)).asUInt()
+        mid.io.s_axis.tkeep := VecInit(mid_data_in.map(x=>x.tkeep)).asUInt()
       }
     }.otherwise{
-      mid.io.s_axis.tdata := VecInit(in_data.map(x=>x.tdata)).asUInt()
-      mid.io.s_axis.tkeep := VecInit(in_data.map(x=>x.tkeep)).asUInt()
+      mid.io.s_axis.tdata := sorted_in.io.m_axis.tdata
+      mid.io.s_axis.tkeep := sorted_in.io.m_axis.tkeep
     }
   }
-  when(mid.io.s_axis.tvalid.asBool() && mid.io.s_axis.tready.asBool()){
-    when(mid_count === 0.U){
-      mid_count := in_count.last
-    }.elsewhen(total_count >= 16.U){
-      mid_count := (total_count - 16.U)
+  when(sorted_in.io.m_axis.tvalid.asBool() && sorted_in.io.m_axis.tready.asBool() &&
+    out.io.s_axis.tvalid.asBool() && out.io.s_axis.tready.asBool()){
+    when(mid_count < 16.U){
+      mid_count := in_count_reg
     }.otherwise{
-      mid_count := total_count
+      mid_count := mid_count + in_count_reg - 16.U
     }
   }.elsewhen(out.io.s_axis.tvalid.asBool() && out.io.s_axis.tready.asBool()){
-    mid_count := 0.U
+    when(mid_count < 16.U){
+      mid_count := 0.U
+    }.otherwise{
+      mid_count := mid_count - 16.U
+    }
+  }.elsewhen(sorted_in.io.m_axis.tvalid.asBool() && sorted_in.io.m_axis.tready.asBool()){
+    mid_count := mid_count + in_count_reg
   }
 
-  in.io.m_axis.tready := mid.io.s_axis.tready | in_count.last === 0.U
-  io.empty := (in.io.m_axis.tvalid | mid.io.m_axis.tvalid | out.io.m_axis.tvalid) === false.B
+  sorted_in.io.m_axis.tready := mid.io.s_axis.tready
+  io.empty := (in.io.m_axis.tvalid | mid.io.m_axis.tvalid | out.io.m_axis.tvalid | sorted_in.io.m_axis.tvalid) === false.B
 }
 
 class Remote_Apply(AXI_ADDR_WIDTH : Int = 64, AXI_DATA_WIDTH: Int, AXI_ID_WIDTH: Int = 6, AXI_SIZE_WIDTH: Int = 3,
@@ -152,12 +169,12 @@ class Remote_Apply(AXI_ADDR_WIDTH : Int = 64, AXI_DATA_WIDTH: Int, AXI_ID_WIDTH:
   io.remote_out.r.ready := true.B
 
   def vid_to_remote(vid: UInt) : Bool = {
-    vid(log2Ceil(Local_Apply_Num) + log2Ceil(FPGA_Num) - 1, log2Ceil(Local_Apply_Num)) =/= io.local_fpga_id
+    vid(log2Ceil(FPGA_Num) - 1, 0) =/= io.local_fpga_id
   }
 
   def vids_to_dest(vids: Seq[UInt], fpgaid: UInt, valid : Seq[Bool]) : Seq[Bool] = {
     vids.zipWithIndex.map{
-      case(i, j) => ((i(log2Ceil(Local_Apply_Num) + log2Ceil(FPGA_Num) - 1, log2Ceil(Local_Apply_Num)) === fpgaid) ||
+      case(i, j) => ((i(log2Ceil(FPGA_Num) - 1, 0) === fpgaid) ||
                       i(31) === 1.U) && valid(j) && (fpgaid =/= io.local_fpga_id)
     }
   }
@@ -208,7 +225,7 @@ class Remote_Apply(AXI_ADDR_WIDTH : Int = 64, AXI_DATA_WIDTH: Int, AXI_ID_WIDTH:
     sync_status := sm.wait_sync_phase1
   }.elsewhen(sync_status === sm.wait_sync_phase1 && io.recv_sync_phase2){
     sync_status := sm.wait_data_flow
-  }.elsewhen(sync_status === sm.wait_data_flow && stall_time === 8.U){
+  }.elsewhen(sync_status === sm.wait_data_flow && stall_time === 12.U){
     sync_status := sm.output_fin_phase2
   }.elsewhen(sync_status === sm.output_fin_phase2 && vertex_in_fifo.io.s_axis.tready.asBool()){
     sync_status := sm.wait_signal
@@ -394,10 +411,18 @@ class Remote_xbar(AXIS_DATA_WIDTH: Int, SLAVE_NUM: Int, MASTER_NUM: Int) extends
     case(in, i) => {in.ready := combiner_level0.io.s_axis.tready(i)}
   }
 
+  val buffer0 = Module(new axis_data_fifo(AXIS_DATA_WIDTH * MASTER_NUM, "Remote_xbar_buffer0"))
+  buffer0.io.s_axis_aclk := clock.asBool()
+  buffer0.io.s_axis_aresetn := ~reset.asBool()
+  buffer0.io.s_axis <> combiner_level0.io.m_axis
+
   val xbar_level0 = Module(new axis_broadcaster(64, 2, "axis_broadcaster_level0"))
   xbar_level0.io.aclk := clock.asBool()
   xbar_level0.io.aresetn := ~reset.asBool()
-  xbar_level0.io.s_axis <> combiner_level0.io.m_axis
+  xbar_level0.io.s_axis.tdata := buffer0.io.m_axis.tdata
+  xbar_level0.io.s_axis.tvalid := buffer0.io.m_axis.tvalid
+  xbar_level0.io.s_axis.tkeep := VecInit(buffer0.io.m_axis.tkeep.asBools().map{x => x & buffer0.io.m_axis.tvalid}).asUInt()
+  buffer0.io.m_axis.tready := xbar_level0.io.s_axis.tready
   xbar_level0.io.m_axis.connectto(io.remote_out.bits, 1)
   io.remote_out.valid := xbar_level0.io.m_axis.tvalid(1)
 
@@ -412,10 +437,18 @@ class Remote_xbar(AXIS_DATA_WIDTH: Int, SLAVE_NUM: Int, MASTER_NUM: Int) extends
   io.remote_in.ready := combiner_level1.io.s_axis.tready(0)
   xbar_level0.io.m_axis.tready := Cat(io.remote_out.ready, combiner_level1.io.s_axis.tready(1))
 
+  val buffer1 = Module(new axis_data_fifo(64*2, "Remote_xbar_buffer1"))
+  buffer1.io.s_axis_aclk := clock.asBool()
+  buffer1.io.s_axis_aresetn := ~reset.asBool()
+  buffer1.io.s_axis <> combiner_level1.io.m_axis
+
   val xbar_level1 = Module(new axis_broadcaster(128, SLAVE_NUM, "axis_broadcaster_level1"))
   xbar_level1.io.aclk := clock.asBool()
   xbar_level1.io.aresetn := ~reset.asBool()
-  xbar_level1.io.s_axis <> combiner_level1.io.m_axis
+  xbar_level1.io.s_axis.tdata := buffer1.io.m_axis.tdata
+  xbar_level1.io.s_axis.tvalid := buffer1.io.m_axis.tvalid
+  xbar_level1.io.s_axis.tkeep := VecInit(buffer1.io.m_axis.tkeep.asBools().map{x => x & buffer1.io.m_axis.tvalid}).asUInt()
+  buffer1.io.m_axis.tready := xbar_level1.io.s_axis.tready
   io.pe_out.zipWithIndex.map{
     case(pe, i) => {
       xbar_level1.io.m_axis.connectto(pe.bits, i)

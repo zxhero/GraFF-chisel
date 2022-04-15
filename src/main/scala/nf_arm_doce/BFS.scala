@@ -44,31 +44,38 @@ class WB_engine(AXI_ADDR_WIDTH : Int = 64, AXI_DATA_WIDTH: Int = 64, AXI_ID_WIDT
   val region_counter_addrb_0 = block_index
 
   //update buffer and region counter
-  val region_counter_doutb_forward = Module(new pipeline(UInt(9.W)))
+  val region_counter_doutb_forward = Module(new axis_reg_slice(2, "region_counter_doutb_forward_reg_slice"))
+  region_counter_doutb_forward.io.aclk := clock.asBool()
+  region_counter_doutb_forward.io.aresetn := ~reset.asBool()
   val region_counter_doutb = Wire(UInt(9.W))
-  val pipeline_1 = Module(new pipeline(new Bundle() {
+  val pipeline_1 = Module(new axis_reg_slice(4, "WB_engine_in_reg_slice"))
+  val pipeline_1_out = Wire(new Bundle() {
     val addr = UInt(16.W)
     val block_index = UInt(12.W)
-  }))
-  pipeline_1.io.din.valid := io.xbar_in.valid && io.xbar_in.ready
-  pipeline_1.io.din.bits.addr := dramaddr(13, 0).asTypeOf(UInt(16.W))
-  pipeline_1.io.din.bits.block_index := block_index
-  io.xbar_in.ready := pipeline_1.io.din.ready
+  })
+  pipeline_1_out.addr := pipeline_1.io.m_axis.tdata(27, 12)
+  pipeline_1_out.block_index := pipeline_1.io.m_axis.tdata(11, 0)
+  pipeline_1.io.aclk := clock.asBool()
+  pipeline_1.io.aresetn := ~reset.asBool()
+  pipeline_1.io.s_axis.tvalid := io.xbar_in.valid && io.xbar_in.ready
+  pipeline_1.io.s_axis.tdata := Cat(dramaddr(13, 0).asTypeOf(UInt(16.W)), block_index.asTypeOf((UInt(12.W))))
+  io.xbar_in.ready := pipeline_1.io.s_axis.tready
 
   buffer.io.ena := true.B
-  buffer.io.wea := pipeline_1.io.dout.valid && pipeline_1.io.dout.ready
-  buffer.io.addra := get_level_addr(pipeline_1.io.dout.bits.block_index, region_counter_doutb)
-  buffer.io.dina := Cat(pipeline_1.io.dout.bits.addr, level)
+  buffer.io.wea := pipeline_1.io.m_axis.tvalid.asBool() && pipeline_1.io.m_axis.tready.asBool()
+  buffer.io.addra := get_level_addr(pipeline_1_out.block_index, region_counter_doutb)
+  buffer.io.dina := Cat(pipeline_1_out.addr, level)
   buffer.io.clka := clock.asBool()
 
-  val region_counter_addra_0 = pipeline_1.io.dout.bits.block_index
-  val region_counter_wea_0 = pipeline_1.io.dout.valid && pipeline_1.io.dout.ready
+  val region_counter_addra_0 = pipeline_1_out.block_index
+  val region_counter_wea_0 = pipeline_1.io.m_axis.tvalid.asBool() && pipeline_1.io.m_axis.tready.asBool()
   val region_counter_dina_0 = counter_inc(region_counter_doutb)
 
-  region_counter_doutb_forward.io.din.valid := io.xbar_in.valid && io.xbar_in.ready &&
+  region_counter_doutb_forward.io.s_axis.tvalid := io.xbar_in.valid && io.xbar_in.ready &&
     region_counter_addra_0 === region_counter_addrb_0 && region_counter_wea_0
-  region_counter_doutb_forward.io.din.bits := region_counter_dina_0
-  region_counter_doutb := Mux(region_counter_doutb_forward.io.dout.valid, region_counter_doutb_forward.io.dout.bits, region_counter.io.doutb)
+  region_counter_doutb_forward.io.s_axis.tdata := region_counter_dina_0
+  region_counter_doutb := Mux(region_counter_doutb_forward.io.m_axis.tvalid.asBool(),
+    region_counter_doutb_forward.io.m_axis.tdata, region_counter.io.doutb)
 
   //write back buffer
   object sm extends ChiselEnum {
@@ -85,9 +92,15 @@ class WB_engine(AXI_ADDR_WIDTH : Int = 64, AXI_DATA_WIDTH: Int = 64, AXI_ID_WIDT
   val flush_start = (wb_sm === sm.idole) && io.flush
   val size_b = RegInit(0.U(8.W))
   val level_base_addr_reg = RegInit(0.U(64.W))
-  val wb_start = pipeline_1.io.dout.valid && region_counter_doutb === 63.U  && wb_sm === sm.idole
-  pipeline_1.io.dout.ready := wb_sm === sm.idole
-  region_counter_doutb_forward.io.dout.ready := wb_sm === sm.idole
+  val wb_start = pipeline_1.io.m_axis.tvalid.asBool() && region_counter_doutb === 63.U  && wb_sm === sm.idole
+  val w_buffer_reg_slice = Module(new axis_reg_slice(8, "w_buffer_reg_slice"))
+  w_buffer_reg_slice.io.aclk := clock.asBool()
+  w_buffer_reg_slice.io.aresetn := ~reset.asBool()
+  val aw_buffer_reg_slice = Module(new axis_reg_slice(8, "aw_buffer_reg_slice"))
+  aw_buffer_reg_slice.io.aclk := clock.asBool()
+  aw_buffer_reg_slice.io.aresetn := ~reset.asBool()
+  pipeline_1.io.m_axis.tready := wb_sm === sm.idole
+  region_counter_doutb_forward.io.m_axis.tready := wb_sm === sm.idole
   level_base_addr_reg := io.level_base_addr
 
   when(wb_start){
@@ -97,7 +110,7 @@ class WB_engine(AXI_ADDR_WIDTH : Int = 64, AXI_DATA_WIDTH: Int = 64, AXI_ID_WIDT
   }
 
   when(wb_start){
-    wb_block_index := pipeline_1.io.dout.bits.block_index
+    wb_block_index := pipeline_1_out.block_index
   }.elsewhen(flush_start){
     wb_block_index := 0.U
   }.elsewhen(wb_sm === sm.wb_1block && wb_block_index =/= (4 * 1024 - 1).U){
@@ -115,7 +128,8 @@ class WB_engine(AXI_ADDR_WIDTH : Int = 64, AXI_DATA_WIDTH: Int = 64, AXI_ID_WIDT
     }
   }.elsewhen(wb_start){
     wb_sm := sm.wb_level
-  }.elsewhen(wb_sm === sm.wb_level && aw_buffer.io.full === false.B && w_buffer.io.full === false.B) {
+  }.elsewhen(wb_sm === sm.wb_level && aw_buffer_reg_slice.io.s_axis.tready.asBool() &&
+    w_buffer_reg_slice.io.s_axis.tready.asBool()) {
     when(count === size_b){
       when(io.flush){
         wb_sm := sm.wb_1block
@@ -135,7 +149,8 @@ class WB_engine(AXI_ADDR_WIDTH : Int = 64, AXI_DATA_WIDTH: Int = 64, AXI_ID_WIDT
 
   when(wb_sm === sm.idole || wb_sm === sm.wb_1block){
     count := 1.U
-  }.elsewhen(wb_sm === sm.wb_level && aw_buffer.io.full === false.B && w_buffer.io.full === false.B){
+  }.elsewhen(wb_sm === sm.wb_level && aw_buffer_reg_slice.io.s_axis.tready.asBool() &&
+    w_buffer_reg_slice.io.s_axis.tready.asBool()){
     count := count + 1.U
   }
 
@@ -155,13 +170,16 @@ class WB_engine(AXI_ADDR_WIDTH : Int = 64, AXI_DATA_WIDTH: Int = 64, AXI_ID_WIDT
   region_counter.io.addrb := MuxCase(block_index, Array(
     (wb_sm === sm.wb_1block) -> (wb_block_index + 1.U),
     (flush_start) -> 0.U,
-    (wb_sm === sm.wb_level) -> (pipeline_1.io.dout.bits.block_index)
+    (wb_sm === sm.wb_level) -> pipeline_1_out.block_index
   ))
 
+  aw_buffer_reg_slice.io.s_axis.tdata := Cat(wb_block_index, buffer.io.doutb(13 + 32,32)).asUInt()
+  aw_buffer_reg_slice.io.s_axis.tvalid := wb_sm === sm.wb_level && w_buffer_reg_slice.io.s_axis.tready.asBool()
+  aw_buffer_reg_slice.io.m_axis.tready := aw_buffer.is_ready()
   aw_buffer.io.clk := clock.asBool()
   aw_buffer.io.srst := reset.asBool()
-  aw_buffer.io.wr_en := wb_sm === sm.wb_level && w_buffer.io.full === false.B
-  aw_buffer.io.din := level_base_addr_reg + Cat(wb_block_index, buffer.io.doutb(13 + 32,32)).asUInt()
+  aw_buffer.io.wr_en := aw_buffer_reg_slice.io.m_axis.tvalid//wb_sm === sm.wb_level && w_buffer.io.full === false.B
+  aw_buffer.io.din := aw_buffer_reg_slice.io.m_axis.tdata + level_base_addr_reg
   val alignment_addr = aw_buffer.io.dout(63, 6)
   io.ddr_aw.bits.awaddr := Cat(alignment_addr, 0.U(6.W))
   io.ddr_aw.bits.awlock := 0.U
@@ -172,10 +190,13 @@ class WB_engine(AXI_ADDR_WIDTH : Int = 64, AXI_DATA_WIDTH: Int = 64, AXI_ID_WIDT
   io.ddr_aw.valid := aw_buffer.is_valid()
   aw_buffer.io.rd_en := io.ddr_aw.ready
 
+  w_buffer_reg_slice.io.s_axis.tdata := buffer.io.doutb(31 + 6, 0)
+  w_buffer_reg_slice.io.s_axis.tvalid := wb_sm === sm.wb_level && aw_buffer_reg_slice.io.s_axis.tready.asBool()
+  w_buffer_reg_slice.io.m_axis.tready := w_buffer.is_ready()
   w_buffer.io.clk := clock.asBool()
   w_buffer.io.srst := reset.asBool()
-  w_buffer.io.wr_en := wb_sm === sm.wb_level && aw_buffer.io.full === false.B
-  w_buffer.io.din := buffer.io.doutb(31 + 6, 0)
+  w_buffer.io.wr_en := w_buffer_reg_slice.io.m_axis.tvalid//wb_sm === sm.wb_level && aw_buffer.io.full === false.B
+  w_buffer.io.din := w_buffer_reg_slice.io.m_axis.tdata
   val alignment_offset = w_buffer.io.dout(5 + 32, 32)
   io.ddr_w.bits.wdata := w_buffer.io.dout(31, 0).asTypeOf(UInt(512.W)) << (8.U * alignment_offset)
   io.ddr_w.bits.wlast := true.B
@@ -240,6 +261,9 @@ class axis_arbitrator(AXIS_DATA_WIDTH: Int = 4, NUM : Int = 16, ELEMENT_WIDTH: I
 
   val data = RegInit(0.U((AXIS_DATA_WIDTH * NUM * 8).W))
   val keep = RegInit(0.U((AXIS_DATA_WIDTH * NUM / ELEMENT_WIDTH).W))
+  val out = Module(new axis_reg_slice(AXIS_DATA_WIDTH, "axis_arbitrator_out_reg_slice_"+AXIS_DATA_WIDTH.toString))
+  out.io.aclk := clock.asBool()
+  out.io.aresetn := ~reset.asBool()
 
   when(io.xbar_in.valid && io.xbar_in.ready){
     data := io.xbar_in.bits.tdata
@@ -248,12 +272,12 @@ class axis_arbitrator(AXIS_DATA_WIDTH: Int = 4, NUM : Int = 16, ELEMENT_WIDTH: I
 
   val select = MuxCase(0.U,
     Array.tabulate(NUM)(x => (keep((x+1) * (AXIS_DATA_WIDTH / ELEMENT_WIDTH) - 1, x * (AXIS_DATA_WIDTH / ELEMENT_WIDTH)).orR() -> (1.U(NUM.W) << x).asUInt())))
-  io.ddr_out.valid := select.orR()
-  io.ddr_out.bits.tkeep := Mux1H(
+  out.io.s_axis.tvalid := select.orR()
+  out.io.s_axis.tkeep := Mux1H(
     Seq.tabulate(NUM)(x => (select(x) -> keep((x + 1) * (AXIS_DATA_WIDTH / ELEMENT_WIDTH) - 1, x * (AXIS_DATA_WIDTH / ELEMENT_WIDTH))))
   )
-  io.ddr_out.bits.tlast := true.B
-  io.ddr_out.bits.tdata :=
+  out.io.s_axis.tlast := true.B
+  out.io.s_axis.tdata :=
     Mux1H(Seq.tabulate(NUM)(x => (select(x) -> data((x + 1) * AXIS_DATA_WIDTH * 8 - 1, x * AXIS_DATA_WIDTH * 8))))
 
   val next_keep = Wire(Vec(NUM, UInt((AXIS_DATA_WIDTH / ELEMENT_WIDTH).W)))
@@ -262,9 +286,13 @@ class axis_arbitrator(AXIS_DATA_WIDTH: Int = 4, NUM : Int = 16, ELEMENT_WIDTH: I
   }
   when(io.xbar_in.valid && io.xbar_in.ready){
     keep := io.xbar_in.bits.tkeep
-  }.elsewhen(io.ddr_out.valid && io.ddr_out.ready) {
+  }.elsewhen((out.io.s_axis.tvalid & out.io.s_axis.tready).asBool()) {
     keep := keep & next_keep.asUInt()
   }
+
+  out.io.m_axis.connectto(io.ddr_out.bits, 0)
+  io.ddr_out.valid := out.io.m_axis.tvalid
+  out.io.m_axis.tready := io.ddr_out.ready
 }
 
 class Gather(AXI_DATA_WIDTH: Int = 64, Broadcast_Num: Int) extends Module{
@@ -435,7 +463,8 @@ class readEdge_engine(AXI_ADDR_WIDTH : Int = 64, AXI_DATA_WIDTH: Int, AXI_ID_WID
 }
 
 class Broadcast(AXI_ADDR_WIDTH : Int = 64, AXI_DATA_WIDTH: Int, AXI_ID_WIDTH: Int = 6, AXI_SIZE_WIDTH: Int = 3,
-                EMBEDDING : Int = 14, Broadcast_Num : Int, Broadcast_index : Int) extends Module{
+                EMBEDDING : Int = 14, Broadcast_Num : Int, Broadcast_index : Int,
+                FPGA_Num: Int) extends Module{
   val io = IO(new Bundle() {
     val ddr_ar = Decoupled(new axiar(AXI_ADDR_WIDTH, AXI_ID_WIDTH, AXI_SIZE_WIDTH))
     val ddr_r = Flipped(Decoupled(new axir(AXI_DATA_WIDTH, AXI_ID_WIDTH)))
@@ -454,6 +483,10 @@ class Broadcast(AXI_ADDR_WIDTH : Int = 64, AXI_DATA_WIDTH: Int, AXI_ID_WIDTH: In
   })
   assert(AXI_DATA_WIDTH >= 8)
   assert(AXI_ID_WIDTH > log2Ceil(32))
+
+  def vid2addr(vid: UInt) : UInt = {
+    io.embedding_base_addr + (vid << log2Ceil(4 * EMBEDDING + 8))
+  }
 
   //upward
   object upward_sm extends ChiselEnum {
@@ -505,7 +538,7 @@ class Broadcast(AXI_ADDR_WIDTH : Int = 64, AXI_DATA_WIDTH: Int, AXI_ID_WIDTH: In
 
   val arbi = Module(new AMBA_Arbiter(new axiar(AXI_ADDR_WIDTH, AXI_ID_WIDTH, AXI_SIZE_WIDTH, 1), 2))
   io.ddr_ar <> arbi.io.out
-  arbi.io.in(1).bits.araddr :=  io.embedding_base_addr + (vertex_read_buffer.io.dout << log2Ceil(4 * EMBEDDING + 8))
+  arbi.io.in(1).bits.araddr :=  vid2addr(vertex_read_buffer.io.dout)
   arbi.io.in(1).valid :=  vertex_read_buffer.is_valid() && vertex_read_buffer.io.dout(31) === 0.U && inflight_vtxs < 32.U
   arbi.io.in(1).bits.arlen := ((4 * EMBEDDING + 8) / AXI_DATA_WIDTH - 1).asUInt()
   arbi.io.in(1).bits.arburst := 1.U(2.W)
@@ -703,8 +736,8 @@ class Scatter(AXIS_DATA_WIDTH: Int = 4, SID: Int, AXI_DATA_WIDTH: Int,
     if(FPGA_Num == 1) {
       vid(log2Ceil(Apply_num) - 1, 0) === sid
     }else{
-      vid(log2Ceil(Apply_num) - 1, 0) === sid &&
-        vid(log2Ceil(Apply_num) + log2Ceil(FPGA_Num) - 1, log2Ceil(Apply_num)) === io.local_fpga_id
+      vid(log2Ceil(Apply_num) + log2Ceil(FPGA_Num) - 1, log2Ceil(FPGA_Num)) === sid &&
+        vid(log2Ceil(FPGA_Num) - 1, 0) === io.local_fpga_id
     }
   }
 
@@ -720,11 +753,18 @@ class Scatter(AXIS_DATA_WIDTH: Int = 4, SID: Int, AXI_DATA_WIDTH: Int,
       vid(log2Ceil(Apply_num) + log2Ceil(FPGA_Num) + 2, log2Ceil(Apply_num) + log2Ceil(FPGA_Num)).asTypeOf(UInt(4.W)))
   }
 
+  val scatter_in = Module(new axis_reg_slice(128, "Scatter_in_reg_slice"))
+  scatter_in.io.aclk := clock.asBool()
+  scatter_in.io.aresetn := ~reset.asBool()
+  scatter_in.io.s_axis.connectfrom(io.xbar_in.bits)
+  scatter_in.io.s_axis.tvalid := io.xbar_in.valid
+  io.xbar_in.ready := scatter_in.io.s_axis.tready
+
   val filtered_keep = Wire(Vec(vertex_num, Bool()))
   filtered_keep.zipWithIndex.map{
     case(k, i) => {
-      k := Mux(io.xbar_in.bits.tkeep(i),
-        Mux(io.xbar_in.bits.get_ith_data(i)(31), true.B, vid_to_sid(io.xbar_in.bits.get_ith_data(i), SID.asUInt())),
+      k := Mux(scatter_in.io.m_axis.tkeep(i),
+        Mux(scatter_in.io.m_axis.tdata(i*32 + 31), true.B, vid_to_sid(scatter_in.io.m_axis.tdata(i*32+31, i*32), SID.asUInt())),
         false.B)
     }
   }
@@ -732,11 +772,11 @@ class Scatter(AXIS_DATA_WIDTH: Int = 4, SID: Int, AXI_DATA_WIDTH: Int,
   val vertex_in_fifo = Module(new axis_data_fifo(128, "vid_32_fifo"))
   vertex_in_fifo.io.s_axis_aclk := clock.asBool()
   vertex_in_fifo.io.s_axis_aresetn := !reset.asBool()
-  vertex_in_fifo.io.s_axis.tdata := io.xbar_in.bits.tdata
-  vertex_in_fifo.io.s_axis.tlast := io.xbar_in.bits.tlast
-  vertex_in_fifo.io.s_axis.tvalid := io.xbar_in.valid
+  vertex_in_fifo.io.s_axis.tdata := scatter_in.io.m_axis.tdata
+  vertex_in_fifo.io.s_axis.tlast := scatter_in.io.m_axis.tlast
+  vertex_in_fifo.io.s_axis.tvalid := scatter_in.io.m_axis.tvalid
   vertex_in_fifo.io.s_axis.tkeep := filtered_keep.asUInt()
-  io.xbar_in.ready := vertex_in_fifo.io.s_axis.tready
+  scatter_in.io.m_axis.tready := vertex_in_fifo.io.s_axis.tready
 
   vertex_in_fifo.io.m_axis.connectto(arbi.io.xbar_in.bits, 0)
   arbi.io.xbar_in.valid := vertex_in_fifo.io.m_axis.tvalid
@@ -836,17 +876,21 @@ class multi_channel_fifo(AXI_DATA_WIDTH: Int = 64, size : Int = 16, val Scatter_
   val counter = RegInit(0.U(log2Ceil(16).W))
   val collector_data = Wire(Vec(16, UInt(32.W)))
   val in_pipeline = Seq.fill(Scatter_num)(
-    Module(new pipeline((new axisdata(4, 4))))
+    Module(new axis_reg_slice(4, "multi_channel_fifo_reg_slice"))
   )
   in_pipeline.zipWithIndex.map{
     case(p, i) => {
-      p.io.din <> io.in(i)
-      p.io.dout.ready := Mux(io.is_current_tier, false.B, fifos_ready)
+      p.io.aclk := clock.asBool()
+      p.io.aresetn := ~reset.asBool()
+      p.io.s_axis.connectfrom(io.in(i).bits)
+      p.io.s_axis.tvalid := io.in(i).valid
+      io.in(i).ready := p.io.s_axis.tready
+      p.io.m_axis.tready := Mux(io.is_current_tier, false.B, fifos_ready)
     }
   }
   val steps = (Seq.tabulate(Scatter_num)(
     i => {
-      Seq.tabulate(i + 1)(x => (in_pipeline(x).io.dout.valid && fifos_ready).asTypeOf(UInt(5.W))).reduce(_+_)
+      Seq.tabulate(i + 1)(x => (in_pipeline(x).io.m_axis.tvalid.asBool() && fifos_ready).asTypeOf(UInt(5.W))).reduce(_+_)
     }
   ))
 
@@ -866,10 +910,10 @@ class multi_channel_fifo(AXI_DATA_WIDTH: Int = 64, size : Int = 16, val Scatter_
   collector_fifos.zipWithIndex.map{
     case (f, i) => {
       val fifo_in_data = MuxCase(0.U, Seq.tabulate(Scatter_num)(
-        x => ((indexSub(counter, i.U) + 1.U) === steps(x)) -> in_pipeline(x).io.dout.bits.tdata)
+        x => ((indexSub(counter, i.U) + 1.U) === steps(x)) -> in_pipeline(x).io.m_axis.tdata)
       )
       val fifo_in_valid = MuxCase(0.U, Seq.tabulate(Scatter_num)(
-        x => ((indexSub(counter, i.U) + 1.U) === steps(x)) -> in_pipeline(x).io.dout.valid)
+        x => ((indexSub(counter, i.U) + 1.U) === steps(x)) -> in_pipeline(x).io.m_axis.tvalid)
       )
       f.io.din := Mux(io.is_current_tier, io.out.din(32 * (i + 1) - 1, 32 * i), fifo_in_data)
       f.io.wr_en := Mux(io.is_current_tier, io.out.wr_en ,fifo_in_valid)
@@ -887,7 +931,7 @@ class multi_channel_fifo(AXI_DATA_WIDTH: Int = 64, size : Int = 16, val Scatter_
 
   val ready_counter = RegInit(0.U(32.W))
   dontTouch(ready_counter)
-  when(fifos_ready === false.B && in_pipeline.map{x => x.io.dout.valid}.reduce(_|_)){
+  when(fifos_ready === false.B && in_pipeline.map{x => x.io.m_axis.tvalid.asBool()}.reduce(_|_)){
     ready_counter := ready_counter + 1.U
   }
 }
@@ -1211,69 +1255,4 @@ class controller (AXI_ADDR_WIDTH : Int = 64, Scatter_num : Int, RegName : Map[St
   io.level := level
   io.start := status === sm.start
   io.flush_cache := status === sm.flush_cache
-}
-
-class BFS(AXI_ADDR_WIDTH : Int = 64, AXI_DATA_WIDTH: Int = 64, AXI_ID_WIDTH: Int = 6, AXI_SIZE_WIDTH: Int = 3) extends Module{
-  val io = IO(new Bundle() {
-    val config = new axilitedata(AXI_ADDR_WIDTH)
-    val PLmemory = Vec(2, Flipped(new axidata(AXI_ADDR_WIDTH, AXI_DATA_WIDTH, AXI_ID_WIDTH, AXI_SIZE_WIDTH)))
-    //val PSmempory = Flipped(Vec(4, new axidata(64, 16, AXI_ID_WIDTH, AXI_SIZE_WIDTH)))
-  })
-
-  val controls = Module(new controller(AXI_ADDR_WIDTH, 16))
-
-
-  val pl_mc = Module(new multi_port_mc(AXI_ADDR_WIDTH, AXI_DATA_WIDTH, AXI_ID_WIDTH, AXI_SIZE_WIDTH, 16))
-  val Scatters = Seq.tabulate(16)(
-    i => Module(new Scatter(4, i, AXI_DATA_WIDTH, 1, 16))
-  )
-  val Gathers = Module(new Gather(64, 1))
-  val Applys = Module(new Apply())
-  val Broadcasts = Module(new Broadcast(AXI_ADDR_WIDTH, AXI_DATA_WIDTH, AXI_ID_WIDTH, AXI_SIZE_WIDTH,
-    14, 1, 0))
-  val bxbar = Module(new broadcast_xbar(64, 16, 1))
-
-  io.PLmemory <> pl_mc.io.ddr_out
-  //Applys.io.level_size := 26.U
-  Applys.io.gather_in <> Gathers.io.gather_out(1)
-  Broadcasts.io.gather_in <> Gathers.io.gather_out(0)
-  Gathers.io.ddr_in <> pl_mc.io.cacheable_out
-  bxbar.io.ddr_in(0) <> Broadcasts.io.xbar_out
-
-  Broadcasts.io.ddr_r <> pl_mc.io.non_cacheable_in.r
-  Broadcasts.io.ddr_ar <> pl_mc.io.non_cacheable_in.ar
-  Applys.io.ddr_w <> pl_mc.io.non_cacheable_in.w
-  Applys.io.ddr_aw <> pl_mc.io.non_cacheable_in.aw
-  Applys.io.ddr_b <> pl_mc.io.non_cacheable_in.b
-
-  Scatters.zipWithIndex.map{
-    case (pe, i) => {
-      pe.io.xbar_in <> bxbar.io.pe_out(i)
-      pe.io.ddr_out <> pl_mc.io.cacheable_in(i)
-      controls.io.fin(i) := pe.io.end
-      pe.io.local_fpga_id := 0.U
-    }
-  }
-
-  //control path
-  controls.io.config <> io.config
-  controls.io.traveled_edges := Broadcasts.io.traveled_edges
-  controls.io.unvisited_size := pl_mc.io.unvisited_size
-  controls.io.flush_cache_end := Applys.io.end
-  controls.io.signal_ack := pl_mc.io.signal_ack
-  Applys.io.flush := controls.io.flush_cache
-  //Gathers.io.signal := controls.io.signal
-  Broadcasts.io.signal := controls.io.signal
-  Broadcasts.io.root := controls.io.data(7)
-  Broadcasts.io.start := controls.io.start
-  Broadcasts.io.embedding_base_addr := Cat(controls.io.data(2), controls.io.data(1))
-  Broadcasts.io.edge_base_addr := Cat(controls.io.data(4), controls.io.data(3))
-  Broadcasts.io.recv_sync := Broadcasts.io.issue_sync
-  Applys.io.level_base_addr := Cat(controls.io.data(6), controls.io.data(5))
-  Applys.io.level := controls.io.level
-  pl_mc.io.tiers_base_addr(0) := Cat(controls.io.data(9), controls.io.data(8))
-  pl_mc.io.tiers_base_addr(1) := Cat(controls.io.data(11), controls.io.data(10))
-  pl_mc.io.signal := controls.io.signal
-  pl_mc.io.start := controls.io.start
-  pl_mc.io.end := controls.io.data(0)(1)
 }

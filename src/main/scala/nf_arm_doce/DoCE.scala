@@ -4,52 +4,7 @@ import chisel3._
 import chisel3.util.Decoupled
 import chisel3.util._
 import nf_arm_doce.{axisdata, axisdata_u}
-
-class pipeline[T <: Data](gen: T, val mname : String) extends Module{
-  val io = IO(new Bundle() {
-    val dout = Decoupled(gen)
-    val din = Flipped(Decoupled(gen))
-  })
-
-  val data = RegInit(0.U.asTypeOf((gen)))
-  val valid = RegInit(false.B)
-  val ready = RegInit(false.B)
-  val data2 = RegInit(0.U.asTypeOf((gen)))
-  val valid2 = RegInit(false.B)
-  //consumer takes 1 or valid is free
-  when(!valid | io.dout.ready){
-    //data2 produce 1
-    when(valid2){
-      data := data2
-      valid := valid2
-    }.elsewhen(io.din.ready){
-      //din produce 1
-      data := io.din.bits
-      valid := io.din.valid
-    }.otherwise{
-      //no producer
-      data := 0.U.asTypeOf((gen))
-      valid := false.B
-    }
-  }
-  ready := io.dout.ready
-
-  //din produce 1 without consumer
-  when(valid && !io.dout.ready && !valid2 ){
-    data2 := io.din.bits
-    valid2 := io.din.valid
-  }.elsewhen(io.dout.ready){
-    //consumer takes 1
-    data2 := 0.U.asTypeOf((gen))
-    valid2 := false.B
-  }
-
-  io.din.ready := ready | !valid | !valid2
-  io.dout.valid := valid
-  io.dout.bits := data
-
-  override def desiredName = mname
-}
+import utils.axis_reg_slice
 
 //modules in transaction layer
 class aw_width_converter(AW_Channel_Width : Int = 84, W_Channel_Width : Int = 144, Dout_Width : Int = 128) extends Module{
@@ -73,91 +28,119 @@ class aw_width_converter(AW_Channel_Width : Int = 84, W_Channel_Width : Int = 14
   })
   assert(Dout_Width > AW_Channel_Width && (Dout_Width + Dout_Width / 8) == W_Channel_Width)
 
-  val bit_sent = RegInit(0.U(32.W))
-  val bit_recv = RegInit(0.U(32.W))
-  val out = Module(new pipeline(out_data, "dout_channel_reg_slice"))
-  val aw_len = io.aw_channel.bits.aw(77, 70)
+  val bit_sent = RegInit(0.U(16.W))
+  val out = Module(new axis_reg_slice(Dout_Width / 8 + 3, "dout_channel_reg_slice"))
+  out.io.aclk := clock.asBool()
+  out.io.aresetn := ~reset.asBool()
+  val aw_in = Module(new axis_reg_slice(11, "aw_channel_reg_slice"))
+  aw_in.io.aclk := clock.asBool()
+  aw_in.io.aresetn := ~reset.asBool()
+  aw_in.io.s_axis.tdata := Cat(io.aw_channel.bits.aw, io.aw_channel.bits.connection_id)
+  aw_in.io.s_axis.tvalid := io.aw_channel.valid
+  io.aw_channel.ready := aw_in.io.s_axis.tready
+  val w_in = Module(new axis_reg_slice(W_Channel_Width / 8, "w_channel_reg_slice"))
+  w_in.io.aclk := clock.asBool()
+  w_in.io.aresetn := ~reset.asBool()
+  w_in.io.s_axis.tdata := io.w_channel.bits.w
+  w_in.io.s_axis.tlast := io.w_channel.bits.last
+  w_in.io.s_axis.tvalid := io.w_channel.valid
+  io.w_channel.ready := w_in.io.s_axis.tready
+  val aw_len = aw_in.io.m_axis.tdata(77 + 4, 70 + 4)
   val mid = RegInit(0.U.asTypeOf(new Bundle() {
     val w = UInt(W_Channel_Width.W)
     val last = Bool()
   }))
-
-  when(io.w_channel.ready && io.w_channel.valid){
-    mid.w := io.w_channel.bits.w
-    mid.last := io.w_channel.bits.last
+  val mid_count = RegInit(0.U(16.W))
+  when((w_in.io.m_axis.tready & w_in.io.m_axis.tvalid).asBool()){
+    when((aw_in.io.m_axis.tready & aw_in.io.m_axis.tvalid).asBool()){
+      mid_count := (W_Channel_Width + 128 - Dout_Width).U
+    }.otherwise{
+      mid_count := mid_count + (W_Channel_Width - Dout_Width).U
+    }
+  }.elsewhen((out.io.s_axis.tvalid & out.io.s_axis.tready).asBool()){
+    when(out.io.s_axis.tlast.asBool()){
+      mid_count := 0.U
+    }.otherwise{
+      mid_count := mid_count - Dout_Width.U
+    }
   }
 
-  when(out.io.din.valid && out.io.din.ready){
-    when(out.io.din.bits.last){
+  when((w_in.io.m_axis.tready & w_in.io.m_axis.tvalid).asBool()){
+    mid.w := w_in.io.m_axis.tdata
+    mid.last := w_in.io.m_axis.tlast
+  }
+
+  when((out.io.s_axis.tvalid & out.io.s_axis.tready).asBool()){
+    when(out.io.s_axis.tlast.asBool()){
       bit_sent := 0.U
     }.otherwise{
       bit_sent := bit_sent + Dout_Width.U
     }
   }
 
-  when(io.w_channel.ready && io.w_channel.valid){
-    when(io.aw_channel.ready && io.aw_channel.valid){
-      bit_recv := bit_recv + W_Channel_Width.U + 128.U
-    }.otherwise{
-      bit_recv := bit_recv + W_Channel_Width.U
-    }
-  }.elsewhen(out.io.din.valid && out.io.din.ready && out.io.din.bits.last){
-    bit_recv := 0.U
-  }
+  io.dout_channel.valid := out.io.m_axis.tvalid
+  io.dout_channel.bits.dout := out.io.m_axis.tdata(Dout_Width + 16, 17)
+  io.dout_channel.bits.last := out.io.m_axis.tlast
+  io.dout_channel.bits.keep := out.io.m_axis.tkeep
+  io.dout_channel.bits.byte_num := out.io.m_axis.tdata(12, 0)
+  io.dout_channel.bits.connection_id := out.io.m_axis.tdata(16, 13)
+  out.io.m_axis.tready := io.dout_channel.ready
 
-  io.dout_channel <> out.io.dout
-  out.io.din.valid := false.B
-  out.io.din.bits.dout := 0.U
-  out.io.din.bits.last := false.B
-  out.io.din.bits.keep := 0.U
-  out.io.din.bits.connection_id := 0.U
-  out.io.din.bits.byte_num := 0.U
-  io.aw_channel.ready := false.B
-  io.w_channel.ready := false.B
-  val left = bit_recv - bit_sent
+  val out_tmp = Wire(out_data)
+  out.io.s_axis.tdata := Cat(out_tmp.dout, Cat(out_tmp.connection_id, out_tmp.byte_num))
+  out.io.s_axis.tkeep := out_tmp.keep
+  out.io.s_axis.tlast := out_tmp.last
+  out.io.s_axis.tvalid := false.B
+  out_tmp.dout := 0.U
+  out_tmp.last := false.B
+  out_tmp.keep := 0.U
+  out_tmp.connection_id := 0.U
+  out_tmp.byte_num := 0.U
+  w_in.io.m_axis.tready := false.B
+  aw_in.io.m_axis.tready := false.B
   //left i bits from the last beat
   for(i <- 0 to W_Channel_Width by (Dout_Width / 8)){
-    when(left === i.U){
+    when(mid_count === i.U){
       if(i == 0){
-        when(bit_sent === 0.U && io.aw_channel.valid && io.w_channel.valid){
+        when(bit_sent === 0.U && aw_in.io.m_axis.tvalid.asBool() && w_in.io.m_axis.tvalid.asBool()){
           if(Dout_Width == 128){
-            out.io.din.bits.dout := io.aw_channel.bits.aw.asTypeOf(UInt(128.W))
+            out_tmp.dout := aw_in.io.m_axis.tdata(AW_Channel_Width + 3, 4).asTypeOf(UInt(128.W))
           }else {
-            out.io.din.bits.dout := Cat(io.w_channel.bits.w(Dout_Width - 128 - 1, 0),
-              io.aw_channel.bits.aw.asTypeOf(UInt(128.W)))
+            out_tmp.dout := Cat(w_in.io.m_axis.tdata(Dout_Width - 128 - 1, 0),
+              aw_in.io.m_axis.tdata(AW_Channel_Width + 3, 4).asTypeOf(UInt(128.W)))
           }
-          out.io.din.valid := true.B
-          out.io.din.bits.last := false.B
-          out.io.din.bits.keep := VecInit(Seq.fill(Dout_Width / 8)(true.B)).asUInt()
-          out.io.din.bits.connection_id := io.aw_channel.bits.connection_id
-          out.io.din.bits.byte_num := 16.U + (W_Channel_Width / 8).U
-          io.aw_channel.ready := out.io.din.ready
-          io.w_channel.ready := out.io.din.ready
-        }.elsewhen(bit_sent > 0.U && io.w_channel.valid){
-          out.io.din.valid := true.B
-          out.io.din.bits.dout := io.w_channel.bits.w(Dout_Width - 1, 0)
-          out.io.din.bits.last := false.B
-          out.io.din.bits.keep := VecInit(Seq.fill(Dout_Width / 8)(true.B)).asUInt()
-          io.w_channel.ready := out.io.din.ready
+          out.io.s_axis.tvalid := true.B
+          out_tmp.last := false.B
+          out_tmp.keep := VecInit(Seq.fill(Dout_Width / 8)(true.B)).asUInt()
+          out_tmp.connection_id := aw_in.io.m_axis.tdata(3, 0)
+          out_tmp.byte_num := 16.U + (W_Channel_Width / 8).U
+          aw_in.io.m_axis.tready := out.io.s_axis.tready
+          w_in.io.m_axis.tready := out.io.s_axis.tready
+        }.elsewhen(bit_sent > 0.U && w_in.io.m_axis.tvalid.asBool()){
+          out.io.s_axis.tvalid := true.B
+          out_tmp.dout := w_in.io.m_axis.tdata(Dout_Width - 1, 0)
+          out_tmp.last := false.B
+          out_tmp.keep := VecInit(Seq.fill(Dout_Width / 8)(true.B)).asUInt()
+          w_in.io.m_axis.tready := out.io.s_axis.tready
         }
       }else if(i < Dout_Width){
         when(mid.last){
-          out.io.din.valid := true.B
-          out.io.din.bits.dout := mid.w(W_Channel_Width - 1, W_Channel_Width - i)
-          out.io.din.bits.last := true.B
-          out.io.din.bits.keep := VecInit(Seq.fill((i / 8))(true.B)).asUInt()
-        }.elsewhen(io.w_channel.valid){
-          out.io.din.valid := true.B
-          out.io.din.bits.dout := Cat(io.w_channel.bits.w(Dout_Width - i - 1, 0), mid.w(W_Channel_Width - 1, W_Channel_Width - i))
-          out.io.din.bits.last := false.B
-          out.io.din.bits.keep := VecInit(Seq.fill(Dout_Width / 8)(true.B)).asUInt()
-          io.w_channel.ready := out.io.din.ready
+          out.io.s_axis.tvalid := true.B
+          out_tmp.dout := mid.w(W_Channel_Width - 1, W_Channel_Width - i)
+          out_tmp.last := true.B
+          out_tmp.keep := VecInit(Seq.fill((i / 8))(true.B)).asUInt()
+        }.elsewhen(w_in.io.m_axis.tvalid.asBool()){
+          out.io.s_axis.tvalid := true.B
+          out_tmp.dout := Cat(w_in.io.m_axis.tdata(Dout_Width - i - 1, 0), mid.w(W_Channel_Width - 1, W_Channel_Width - i))
+          out_tmp.last := false.B
+          out_tmp.keep := VecInit(Seq.fill(Dout_Width / 8)(true.B)).asUInt()
+          w_in.io.m_axis.tready := out.io.s_axis.tready
         }
       }else if(i >= Dout_Width){
-        out.io.din.valid := true.B
-        out.io.din.bits.dout := mid.w(W_Channel_Width - i + Dout_Width - 1, W_Channel_Width - i)
-        out.io.din.bits.last := false.B
-        out.io.din.bits.keep := VecInit(Seq.fill(Dout_Width / 8)(true.B)).asUInt()
+        out.io.s_axis.tvalid := true.B
+        out_tmp.dout := mid.w(W_Channel_Width - i + Dout_Width - 1, W_Channel_Width - i)
+        out_tmp.last := false.B
+        out_tmp.keep := VecInit(Seq.fill(Dout_Width / 8)(true.B)).asUInt()
       }
     }
   }
@@ -181,79 +164,96 @@ class aw_decode(AW_Channel_Width : Int = 80, W_Channel_Width : Int = 144, Din_Wi
   })
   assert(Din_Width > AW_Channel_Width && (Din_Width + Din_Width / 8) == W_Channel_Width)
 
-  val bit_recv = RegInit(0.U(32.W))
-  val bit_sent = RegInit(0.U(32.W))
-  val aw_channel_out = Module(new pipeline(new Bundle() {
-    val aw = UInt(AW_Channel_Width.W)
-  }, "aw_channel_out_reg_slice"))
-  val w_channel_out = Module(new pipeline(new Bundle() {
-    val w = UInt(W_Channel_Width.W)
-    val last = Bool()
-  }, "w_channel_out_reg_slice"))
+  val bit_sent = RegInit(0.U(16.W))
+  val in = Module(new axis_reg_slice(Din_Width / 8, "aw_decode_in_reg_slice"))
+  in.io.aclk := clock.asBool()
+  in.io.aresetn := ~reset.asBool()
+  in.io.s_axis.tvalid := io.din_channel.valid
+  in.io.s_axis.tdata := io.din_channel.bits.din
+  in.io.s_axis.tlast := io.din_channel.bits.last
+  io.din_channel.ready := in.io.s_axis.tready
+  val aw_channel_out = Module(new axis_reg_slice(AW_Channel_Width / 8, "aw_channel_out_reg_slice"))
+  aw_channel_out.io.aclk := clock.asBool()
+  aw_channel_out.io.aresetn := ~reset.asBool()
+  val w_channel_out = Module(new axis_reg_slice(W_Channel_Width / 8, "w_channel_out_reg_slice"))
+  w_channel_out.io.aclk := clock.asBool()
+  w_channel_out.io.aresetn := ~reset.asBool()
   val mid = RegInit(0.U.asTypeOf(new Bundle() {
     val w = UInt(Din_Width.W)
     val last = Bool()
   }))
-
-  when(io.din_channel.ready && io.din_channel.valid){
-    when(io.din_channel.bits.last){
-      bit_recv := 0.U
+  val mid_count = RegInit(0.U(16.W))
+  when((in.io.m_axis.tvalid & in.io.m_axis.tready).asBool()){
+    when(mid_count === 0.U){
+      when(bit_sent === 0.U){
+        mid_count := (Din_Width - 128).U
+      }.otherwise{
+        mid_count := Din_Width.U
+      }
     }.otherwise{
-      bit_recv := bit_recv + Din_Width.U
+      when(in.io.m_axis.tlast.asBool()){
+        mid_count := 0.U
+      }.otherwise{
+        mid_count := mid_count - (W_Channel_Width - Din_Width).U
+      }
     }
   }
 
-  when(w_channel_out.io.din.valid && w_channel_out.io.din.ready){
-    when(w_channel_out.io.din.bits.last){
+  when((w_channel_out.io.s_axis.tvalid & w_channel_out.io.s_axis.tready).asBool()){
+    when(w_channel_out.io.s_axis.tlast.asBool()){
       bit_sent := 0.U
     }.otherwise{
       bit_sent := bit_sent + W_Channel_Width.U
     }
-  }.elsewhen(aw_channel_out.io.din.valid && aw_channel_out.io.din.ready){
+  }.elsewhen((aw_channel_out.io.s_axis.tvalid & aw_channel_out.io.s_axis.tready).asBool()){
     bit_sent := bit_sent + 128.U
   }
 
-  when(io.din_channel.ready && io.din_channel.valid){
-    mid.w := io.din_channel.bits.din
-    mid.last := io.din_channel.bits.last
+  when((in.io.m_axis.tvalid & in.io.m_axis.tready).asBool()){
+    mid.w := in.io.m_axis.tdata
+    mid.last := in.io.m_axis.tlast
   }
 
-  io.aw_channel <> aw_channel_out.io.dout
-  io.w_channel <> w_channel_out.io.dout
+  io.aw_channel.valid := aw_channel_out.io.m_axis.tvalid
+  io.aw_channel.bits.aw := aw_channel_out.io.m_axis.tdata
+  aw_channel_out.io.m_axis.tready := io.aw_channel.ready
+  io.w_channel.valid := w_channel_out.io.m_axis.tvalid
+  io.w_channel.bits.last := w_channel_out.io.m_axis.tlast
+  io.w_channel.bits.w := w_channel_out.io.m_axis.tdata
+  w_channel_out.io.m_axis.tready := io.w_channel.ready
 
-  io.din_channel.ready := false.B
-  w_channel_out.io.din.valid := false.B
-  w_channel_out.io.din.bits.w := 0.U
-  w_channel_out.io.din.bits.last := false.B
-  aw_channel_out.io.din.valid := false.B
-  val left = bit_recv - bit_sent
+  in.io.m_axis.tready := false.B
+  w_channel_out.io.s_axis.tvalid := false.B
+  w_channel_out.io.s_axis.tdata := 0.U
+  w_channel_out.io.s_axis.tlast := false.B
+  aw_channel_out.io.s_axis.tvalid := false.B
   //left i bits from the last beat
   for(i <- 0 to Din_Width by (Din_Width / 8)){
-    when(left === i.U){
+    when(mid_count === i.U){
       if(i == 0){
-        when(bit_sent === 0.U && io.din_channel.valid){
-          aw_channel_out.io.din.valid := true.B
-          io.din_channel.ready := aw_channel_out.io.din.ready
-        }.elsewhen(io.din_channel.valid){
-          io.din_channel.ready := true.B
+        when(bit_sent === 0.U && in.io.m_axis.tvalid.asBool()){
+          aw_channel_out.io.s_axis.tvalid := true.B
+          in.io.m_axis.tready := aw_channel_out.io.s_axis.tready
+        }.elsewhen(in.io.m_axis.tvalid.asBool()){
+          in.io.m_axis.tready := true.B
         }
       }else{
-        when(io.din_channel.valid){
-          io.din_channel.ready := w_channel_out.io.din.ready
-          w_channel_out.io.din.valid := true.B
-          w_channel_out.io.din.bits.w := Cat(io.din_channel.bits.din(W_Channel_Width - i - 1, 0), mid.w(Din_Width - 1, Din_Width - i))
-          w_channel_out.io.din.bits.last := io.din_channel.bits.last
+        when(in.io.m_axis.tvalid.asBool()){
+          in.io.m_axis.tready := w_channel_out.io.s_axis.tready
+          w_channel_out.io.s_axis.tvalid := true.B
+          w_channel_out.io.s_axis.tdata := Cat(in.io.m_axis.tdata(W_Channel_Width - i - 1, 0), mid.w(Din_Width - 1, Din_Width - i))
+          w_channel_out.io.s_axis.tlast := in.io.m_axis.tlast
         }
       }
     }
   }
 
-  aw_channel_out.io.din.bits.aw := Cat(io.din_channel.bits.din(83, 8), io.din_channel.bits.din(3, 0))
-  when(io.din_channel.bits.din(7, 4) === io.phy_base_0(47, 44) && io.phy_base_0(48)){
-    aw_channel_out.io.din.bits.aw := Cat(io.din_channel.bits.din(83, 8), io.din_channel.bits.din(3, 0)) |
+  aw_channel_out.io.s_axis.tdata := Cat(in.io.m_axis.tdata(83, 8), in.io.m_axis.tdata(3, 0))
+  when(in.io.m_axis.tdata(7, 4) === io.phy_base_0(47, 44) && io.phy_base_0(48)){
+    aw_channel_out.io.s_axis.tdata := Cat(in.io.m_axis.tdata(83, 8), in.io.m_axis.tdata(3, 0)) |
       Cat(io.phy_base_0(43, 0), 0.U(4.W)).asTypeOf(UInt(AW_Channel_Width.W))
-  }.elsewhen(io.din_channel.bits.din(7, 4) === io.phy_base_1(47, 44) && io.phy_base_1(48)){
-    aw_channel_out.io.din.bits.aw := Cat(io.din_channel.bits.din(83, 8), io.din_channel.bits.din(3, 0)) |
+  }.elsewhen(in.io.m_axis.tdata(7, 4) === io.phy_base_1(47, 44) && io.phy_base_1(48)){
+    aw_channel_out.io.s_axis.tdata := Cat(in.io.m_axis.tdata(83, 8), in.io.m_axis.tdata(3, 0)) |
       Cat(io.phy_base_1(43, 0), 0.U(4.W)).asTypeOf(UInt(AW_Channel_Width.W))
   }
 }

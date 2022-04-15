@@ -18,11 +18,6 @@ object V2Lgen extends App {
 }
 //sbt 'test:runMain nf_arm_doce.V2Lgen -td ./generated/V2L'
 
-object BFSgen extends App {
-  val verilogString = (new chisel3.stage.ChiselStage).emitVerilog(new BFS(), args)
-  //println(verilogString)
-}
-
 class BFS_ps(AXI_ADDR_WIDTH : Int = 64, AXI_DATA_WIDTH: Int = 64, AXI_ID_WIDTH: Int = 6, AXI_SIZE_WIDTH: Int = 3) extends Module{
   val io = IO(new Bundle() {
     val config = new axilitedata(AXI_ADDR_WIDTH)
@@ -43,7 +38,7 @@ class BFS_ps(AXI_ADDR_WIDTH : Int = 64, AXI_DATA_WIDTH: Int = 64, AXI_ID_WIDTH: 
   val LevelCache = Module(new Apply(AXI_ADDR_WIDTH, AXI_DATA_WIDTH, AXI_ID_WIDTH + 1, AXI_SIZE_WIDTH))
   val Scatters = Seq.tabulate(4)(
     i => Module(new Broadcast(64, 16, 6, 3,
-      14, 5, i))
+      14, 5, i, 2))
   )
   val Broadcaster = Module(new Remote_xbar(16, 16, 4))
   val ReApply = Module(new Remote_Apply(AXI_ADDR_WIDTH, 64, 6, 3, 64,
