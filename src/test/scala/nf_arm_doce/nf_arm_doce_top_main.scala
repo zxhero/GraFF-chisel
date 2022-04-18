@@ -27,24 +27,20 @@ class BFS_ps(AXI_ADDR_WIDTH : Int = 64, AXI_DATA_WIDTH: Int = 64, AXI_ID_WIDTH: 
     val Re_memory_in = new axidata(AXI_ADDR_WIDTH, AXI_DATA_WIDTH, AXI_ID_WIDTH + 4, AXI_SIZE_WIDTH)
   })
 
-  val controls = Module(new controller(AXI_ADDR_WIDTH, 17,
+  val controls = Module(new controller(AXI_ADDR_WIDTH, 16,
     Map("fpga_id" -> 16, "Rlevel_lo" -> 17, "Rlevel_hi" -> 18)))
 
   val MemController = Module(new multi_port_mc(AXI_ADDR_WIDTH, AXI_DATA_WIDTH, AXI_ID_WIDTH + 1, AXI_SIZE_WIDTH, 16))
   val Applys = Seq.tabulate(16)(
-    i => Module(new Scatter(4, i, 128, 2, 16))
+    i => Module(new Scatter(4, i, 128, 1, 16))
   )
   val Gathers = Module(new Gather(64, 4))
   val LevelCache = Module(new Apply(AXI_ADDR_WIDTH, AXI_DATA_WIDTH, AXI_ID_WIDTH + 1, AXI_SIZE_WIDTH))
   val Scatters = Seq.tabulate(4)(
     i => Module(new Broadcast(64, 16, 6, 3,
-      14, 5, i, 2))
+      14, 4, i, 1))
   )
-  val Broadcaster = Module(new Remote_xbar(16, 16, 4))
-  val ReApply = Module(new Remote_Apply(AXI_ADDR_WIDTH, 64, 6, 3, 64,
-    4, 2, 16))
-  val ReScatter = Module(new Remote_Scatter(AXI_ADDR_WIDTH, 64, 6, 3,
-    64, 2))
+  val Broadcaster = Module(new broadcast_xbar(16, 16, 4))
 
   io.PLmemory <> MemController.io.ddr_out
   Gathers.io.ddr_in <> MemController.io.cacheable_out
@@ -67,10 +63,23 @@ class BFS_ps(AXI_ADDR_WIDTH : Int = 64, AXI_DATA_WIDTH: Int = 64, AXI_ID_WIDTH: 
       controls.io.fin(i) := pe.io.end
     }
   }
-  Broadcaster.io.remote_in <> ReScatter.io.xbar_out
-  ReScatter.io.remote_in <> io.Re_memory_in
-  ReApply.io.xbar_in <> Broadcaster.io.remote_out
-  io.Re_memory_out <> ReApply.io.remote_out
+
+  //tie off remote port
+  io.Re_memory_in.r.bits.tie_off()
+  io.Re_memory_in.r.valid := false.B
+  io.Re_memory_in.b.bits.tie_off()
+  io.Re_memory_in.b.valid := false.B
+  io.Re_memory_in.ar.ready := true.B
+  io.Re_memory_in.aw.ready := true.B
+  io.Re_memory_in.w.ready := true.B
+  io.Re_memory_out.aw.bits.tie_off(0.U)
+  io.Re_memory_out.aw.valid := false.B
+  io.Re_memory_out.ar.bits.tie_off(0.U)
+  io.Re_memory_out.ar.valid := false.B
+  io.Re_memory_out.w.bits.tie_off()
+  io.Re_memory_out.w.valid := false.B
+  io.Re_memory_out.r.ready := true.B
+  io.Re_memory_out.b.ready := true.B
 
   //tie off unnecessary ports
   io.PSmemory.map{
@@ -89,11 +98,11 @@ class BFS_ps(AXI_ADDR_WIDTH : Int = 64, AXI_DATA_WIDTH: Int = 64, AXI_ID_WIDTH: 
   //control path
   controls.io.config <> io.config
   controls.io.traveled_edges := Scatters.map{i => i.io.traveled_edges}.reduce(_+_)
-  controls.io.unvisited_size := MemController.io.unvisited_size + ReScatter.io.remote_unvisited_size
+  controls.io.unvisited_size := MemController.io.unvisited_size
   controls.io.flush_cache_end := LevelCache.io.end
-  controls.io.signal_ack := MemController.io.signal_ack && ReApply.io.signal_ack
-  controls.io.fin.last := ReApply.io.end
-  controls.io.performance(0) := !ReApply.io.xbar_in.ready
+  controls.io.signal_ack := MemController.io.signal_ack
+  //controls.io.fin.last := ReApply.io.end
+  controls.io.performance(0) := false.B
   LevelCache.io.flush := controls.io.flush_cache
   LevelCache.io.level_base_addr := Cat(controls.io.data(6), controls.io.data(5))
   LevelCache.io.level := controls.io.level
@@ -108,7 +117,7 @@ class BFS_ps(AXI_ADDR_WIDTH : Int = 64, AXI_DATA_WIDTH: Int = 64, AXI_ID_WIDTH: 
       }else{
         b.io.start := false.B
       }
-      b.io.recv_sync := VecInit(Scatters.map{i => i.io.issue_sync}.+:(ReScatter.io.issue_sync)).asUInt()
+      b.io.recv_sync := VecInit(Scatters.map{i => i.io.issue_sync}).asUInt()
     }
   }
   MemController.io.tiers_base_addr(0) := Cat(controls.io.data(9), controls.io.data(8))
@@ -116,15 +125,7 @@ class BFS_ps(AXI_ADDR_WIDTH : Int = 64, AXI_DATA_WIDTH: Int = 64, AXI_ID_WIDTH: 
   MemController.io.signal := controls.io.signal && controls.io.signal_ack
   MemController.io.start := controls.io.start
   MemController.io.end := controls.io.data(0)(1)
-  ReApply.io.recv_sync := VecInit(Scatters.map{i => i.io.issue_sync}).asUInt()
-  ReApply.io.local_fpga_id := controls.GetRegByName("fpga_id")
-  ReApply.io.level_base_addr := Cat(controls.GetRegByName("Rlevel_hi"), controls.GetRegByName("Rlevel_lo"))
-  ReApply.io.signal := controls.io.signal && controls.io.signal_ack
-  ReApply.io.local_unvisited_size := MemController.io.unvisited_size
-  ReApply.io.recv_sync_phase2 := ReScatter.io.issue_sync_phase2
   Applys.map{x => x.io.local_fpga_id := controls.GetRegByName("fpga_id")}
-  ReScatter.io.start := controls.io.start
-  ReScatter.io.signal := controls.io.signal && controls.io.signal_ack
 }
 
 object BFSPSgen extends App {
