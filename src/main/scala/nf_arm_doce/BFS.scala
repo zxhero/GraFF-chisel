@@ -682,23 +682,33 @@ class broadcast_xbar(AXIS_DATA_WIDTH: Int, SLAVE_NUM: Int, MASTER_NUM: Int) exte
     val pe_out = Vec(SLAVE_NUM, Decoupled(new axisdata(AXIS_DATA_WIDTH * MASTER_NUM, 4)))
   })
   //ddr_in to pe_out direction
-  val xbar = Module(new axis_broadcaster(AXIS_DATA_WIDTH * MASTER_NUM, SLAVE_NUM, "axis_broadcaster"))
+  val xbar = Module(new axis_broadcaster(AXIS_DATA_WIDTH * MASTER_NUM, SLAVE_NUM,
+    "axis_broadcaster_"+(AXIS_DATA_WIDTH * MASTER_NUM).toString))
   if(MASTER_NUM == 1){
     xbar.io.s_axis.connectfrom(io.ddr_in(0).bits)
     xbar.io.s_axis.tvalid := io.ddr_in(0).valid
     io.ddr_in(0).ready := xbar.io.s_axis.tready
   }else{
-    val combiner = Module(new axis_combiner(AXIS_DATA_WIDTH, MASTER_NUM, "axis_combiner"))
+    val combiner = Module(new axis_combiner(AXIS_DATA_WIDTH, MASTER_NUM, "axis_combiner_level0"))
     combiner.io.aclk := clock.asBool()
     combiner.io.aresetn := ~reset.asBool()
     combiner.io.s_axis.tdata := VecInit.tabulate(MASTER_NUM){i => io.ddr_in(i).bits.tdata}.asUInt()
-    combiner.io.s_axis.tkeep := VecInit.tabulate(MASTER_NUM){i => VecInit(io.ddr_in(i).bits.tkeep.asBools().map{x => x & io.ddr_in(i).valid})}.asUInt()
+    combiner.io.s_axis.tkeep := VecInit.tabulate(MASTER_NUM){i => VecInit(io.ddr_in(i).bits.tkeep.asBools().map{x => x &
+      io.ddr_in(i).valid})}.asUInt()
     combiner.io.s_axis.tlast := VecInit.tabulate(MASTER_NUM){i => io.ddr_in(i).bits.tlast}.asUInt()
     combiner.io.s_axis.tvalid := VecInit(Seq.fill(MASTER_NUM)(io.ddr_in.map{i => i.valid}.reduce(_|_))).asUInt()
     io.ddr_in.zipWithIndex.map{
       case(in, i) => {in.ready := combiner.io.s_axis.tready(i)}
     }
-    xbar.io.s_axis <> combiner.io.m_axis
+
+    val buffer0 = Module(new axis_data_fifo(AXIS_DATA_WIDTH * MASTER_NUM, "Remote_xbar_buffer0"))
+    buffer0.io.s_axis_aclk := clock.asBool()
+    buffer0.io.s_axis_aresetn := ~reset.asBool()
+    buffer0.io.s_axis <> combiner.io.m_axis
+    xbar.io.s_axis.tdata := buffer0.io.m_axis.tdata
+    xbar.io.s_axis.tvalid := buffer0.io.m_axis.tvalid
+    xbar.io.s_axis.tkeep := VecInit(buffer0.io.m_axis.tkeep.asBools().map{x => x & buffer0.io.m_axis.tvalid}).asUInt()
+    buffer0.io.m_axis.tready := xbar.io.s_axis.tready
   }
 
   xbar.io.aclk := clock.asBool()
