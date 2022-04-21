@@ -16,10 +16,8 @@ class axisdata(AXIS_DATA_WIDTH: Int = 8, ELEMENT_WIDTH: Int = 1) extends Bundle 
   }
 }
 
-class axisdata_u(AXIS_DATA_WIDTH: Int = 8, AXIS_USER_WIDTH: Int = 4) extends Bundle {
-  val tdata = UInt((8 * AXIS_DATA_WIDTH).W)
-  val tkeep = UInt(AXIS_DATA_WIDTH.W)
-  val tlast = Bool()
+class axisdata_u(AXIS_DATA_WIDTH: Int = 8, AXIS_USER_WIDTH: Int = 4)
+  extends axisdata(AXIS_DATA_WIDTH, 1) {
   val tuser = UInt(AXIS_USER_WIDTH.W)
 }
 
@@ -105,6 +103,12 @@ class streamdata_id_blackbox(AXIS_DATA_WIDTH: Int = 8, ELEMENT_WIDTH: Int = 1, n
                               AXIS_ID_WIDTH: Int = 5)
       extends streamdata_blackbox(AXIS_DATA_WIDTH, ELEMENT_WIDTH, num){
   val tid = Input(UInt((num * AXIS_ID_WIDTH).W))
+}
+
+class streamdata_user_blackbox(AXIS_DATA_WIDTH: Int = 8, ELEMENT_WIDTH: Int = 1, num : Int = 1,
+                             AXIS_USER_WIDTH: Int = 5)
+  extends streamdata_blackbox(AXIS_DATA_WIDTH, ELEMENT_WIDTH, num){
+  val tuser = Input(UInt((num * AXIS_USER_WIDTH).W))
 }
 
 class streamdata_blackbox(AXIS_DATA_WIDTH: Int = 8, ELEMENT_WIDTH: Int = 1, num : Int = 1) extends Bundle {

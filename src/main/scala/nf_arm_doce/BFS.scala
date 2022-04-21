@@ -252,44 +252,51 @@ class Apply(AXI_ADDR_WIDTH : Int = 64, AXI_DATA_WIDTH: Int = 64, AXI_ID_WIDTH: I
   update_engine.io.flush := io.flush & vertex_update_buffer.is_empty()
 }
 
-//TODO: use axis_width_converter IP
-class axis_arbitrator(AXIS_DATA_WIDTH: Int = 4, NUM : Int = 16, ELEMENT_WIDTH: Int = 4) extends Module{
+class axis_arbitrator(AXIS_DATA_WIDTH: Int = 4, NUM : Int, ELEMENT_WIDTH: Int = 4) extends Module{
   val io = IO(new Bundle() {
     val xbar_in = Flipped(Decoupled(new axisdata(AXIS_DATA_WIDTH * NUM, ELEMENT_WIDTH)))
     val ddr_out = Decoupled(new axisdata(AXIS_DATA_WIDTH, ELEMENT_WIDTH))
   })
+  assert(AXIS_DATA_WIDTH == ELEMENT_WIDTH)
+  val in = Module(new axis_reg_slice(AXIS_DATA_WIDTH * NUM,
+    "axis_arbitrator_in_reg_slice_"+(AXIS_DATA_WIDTH * NUM).toString))
+  in.io.aclk := clock.asBool()
+  in.io.aresetn := ~reset.asBool()
+  in.io.s_axis.connectfrom(io.xbar_in.bits)
+  in.io.s_axis.tvalid := io.xbar_in.valid
+  io.xbar_in.ready := in.io.s_axis.tready
 
-  val data = RegInit(0.U((AXIS_DATA_WIDTH * NUM * 8).W))
-  val keep = RegInit(0.U((AXIS_DATA_WIDTH * NUM / ELEMENT_WIDTH).W))
+  val data = in.io.m_axis.tdata
+  val keep = VecInit(in.io.m_axis.tkeep(AXIS_DATA_WIDTH / ELEMENT_WIDTH * NUM - 1, 0).asBools())
+  val index = RegInit(VecInit(Seq.fill(AXIS_DATA_WIDTH / ELEMENT_WIDTH * NUM)(false.B)))
+  val ungrant_keep = keep.zip(index).map{
+    case (a, b) => a && !b
+  }
+  val grant = VecInit(AMBA_ArbiterCtrl(ungrant_keep))
+  val choosen_keep = grant.zip(ungrant_keep).map{
+    case (a, b) => a && b
+  }
   val out = Module(new axis_reg_slice(AXIS_DATA_WIDTH, "axis_arbitrator_out_reg_slice_"+AXIS_DATA_WIDTH.toString))
   out.io.aclk := clock.asBool()
   out.io.aresetn := ~reset.asBool()
 
-  when(io.xbar_in.valid && io.xbar_in.ready){
-    data := io.xbar_in.bits.tdata
+  index.zip(choosen_keep).map{
+    case (a, b) => {
+      when(out.io.s_axis.tvalid.asBool() && out.io.s_axis.tready.asBool()){
+        a := a | b
+      }.elsewhen(in.io.m_axis.tready.asBool() && in.io.m_axis.tvalid.asBool()){
+        a := false.B
+      }
+    }
   }
-  io.xbar_in.ready := ~(keep.orR())
 
-  val select = MuxCase(0.U,
-    Array.tabulate(NUM)(x => (keep((x+1) * (AXIS_DATA_WIDTH / ELEMENT_WIDTH) - 1, x * (AXIS_DATA_WIDTH / ELEMENT_WIDTH)).orR() -> (1.U(NUM.W) << x).asUInt())))
-  out.io.s_axis.tvalid := select.orR()
-  out.io.s_axis.tkeep := Mux1H(
-    Seq.tabulate(NUM)(x => (select(x) -> keep((x + 1) * (AXIS_DATA_WIDTH / ELEMENT_WIDTH) - 1, x * (AXIS_DATA_WIDTH / ELEMENT_WIDTH))))
-  )
+  in.io.m_axis.tready := !choosen_keep.reduce(_|_)
+
+  out.io.s_axis.tvalid := choosen_keep.reduce(_|_) && in.io.m_axis.tvalid.asBool()
+  out.io.s_axis.tkeep := 1.U
   out.io.s_axis.tlast := true.B
   out.io.s_axis.tdata :=
-    Mux1H(Seq.tabulate(NUM)(x => (select(x) -> data((x + 1) * AXIS_DATA_WIDTH * 8 - 1, x * AXIS_DATA_WIDTH * 8))))
-
-  val next_keep = Wire(Vec(NUM, UInt((AXIS_DATA_WIDTH / ELEMENT_WIDTH).W)))
-  next_keep.zipWithIndex.map{
-    case(k, i) => (k := Mux(select(i), 0.U((AXIS_DATA_WIDTH / ELEMENT_WIDTH).W), ~0.U((AXIS_DATA_WIDTH / ELEMENT_WIDTH).W)))
-  }
-  when(io.xbar_in.valid && io.xbar_in.ready){
-    keep := io.xbar_in.bits.tkeep
-  }.elsewhen((out.io.s_axis.tvalid & out.io.s_axis.tready).asBool()) {
-    keep := keep & next_keep.asUInt()
-  }
-
+    Mux1H(Seq.tabulate(NUM)(x => (choosen_keep(x) -> data((x + 1) * AXIS_DATA_WIDTH * 8 - 1, x * AXIS_DATA_WIDTH * 8))))
   out.io.m_axis.connectto(io.ddr_out.bits, 0)
   io.ddr_out.valid := out.io.m_axis.tvalid
   out.io.m_axis.tready := io.ddr_out.ready
