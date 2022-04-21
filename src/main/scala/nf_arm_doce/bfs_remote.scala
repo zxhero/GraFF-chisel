@@ -376,7 +376,7 @@ class Remote_Scatter(AXI_ADDR_WIDTH : Int = 64, AXI_DATA_WIDTH: Int, AXI_ID_WIDT
 
   val syncs = RegInit(VecInit(Seq.fill(FPGA_Num)(0.U(FPGA_Num.W))))
   val is_sync = vertex_in_fifo.io.m_axis.tvalid.asBool() && vertex_in_fifo.io.m_axis.tdata(31) === 1.U &&
-    vertex_in_fifo.io.m_axis.tkeep(0) === 1.U
+    vertex_in_fifo.io.m_axis.tkeep(0) === 1.U && !io.issue_sync
   syncs.zipWithIndex.map{
     case(sync, i) => {
       when(io.local_fpga_id === i.U){
@@ -392,12 +392,12 @@ class Remote_Scatter(AXI_ADDR_WIDTH : Int = 64, AXI_DATA_WIDTH: Int, AXI_ID_WIDT
   io.issue_sync := syncs.map(x=>(x === 2.U)).reduce(_&_)
   vertex_in_fifo.io.m_axis.connectto(io.xbar_out.bits, 0)
   vertex_in_fifo.io.m_axis.tready := MuxCase(io.xbar_out.ready, Array(
-    is_sync -> true.B,
-    io.issue_sync -> false.B
+    io.issue_sync -> false.B,
+    is_sync -> true.B
   ))
   io.xbar_out.valid := MuxCase(vertex_in_fifo.io.m_axis.tvalid, Array(
-    is_sync -> false.B,
-    io.issue_sync -> false.B
+    io.issue_sync -> false.B,
+    is_sync -> false.B
   ))
 
   val unvisited_size_reg = RegInit(0.U(32.W))
