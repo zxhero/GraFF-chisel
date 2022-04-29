@@ -37,7 +37,7 @@ class BFS_ps(AXI_ADDR_WIDTH : Int = 64, AXI_DATA_WIDTH: Int = 64, AXI_ID_WIDTH: 
   val MemController = Module(new multi_port_mc(AXI_ADDR_WIDTH, AXI_DATA_WIDTH, AXI_ID_WIDTH + 1,
     AXI_SIZE_WIDTH, 16))
   val Applys = Seq.tabulate(16)(
-    i => Module(new Scatter(4, i, 128, 4, 16))
+    i => Module(new Scatter(4, i, 64, 4, 16))
   )
   val Gathers = Module(new Gather(64, 4))
   val LevelCache = Module(new Apply(AXI_ADDR_WIDTH, AXI_DATA_WIDTH, AXI_ID_WIDTH + 1, AXI_SIZE_WIDTH))
@@ -139,6 +139,7 @@ class BFS_ps(AXI_ADDR_WIDTH : Int = 64, AXI_DATA_WIDTH: Int = 64, AXI_ID_WIDTH: 
       r.io.local_unvisited_size := MemController.io.unvisited_size
       r.io.recv_sync_phase2 := ReScatter.io.issue_sync_phase2(i)
       r.io.packet_size := controls.GetRegByName("packet_size")
+      r.io.level := controls.io.level
     }
   }
   Applys.map{x => x.io.local_fpga_id := controls.GetRegByName("fpga_id")}
@@ -149,6 +150,9 @@ class BFS_ps(AXI_ADDR_WIDTH : Int = 64, AXI_DATA_WIDTH: Int = 64, AXI_ID_WIDTH: 
     x => Cat(controls.GetRegByName("Rlevel_hi_"+x.toString),
       controls.GetRegByName("Rlevel_lo_"+x.toString))
   ))
+  Broadcaster.io.local_fpga_id := controls.GetRegByName("fpga_id")
+  Broadcaster.io.flush := Scatters.map{i => i.io.issue_sync}.reduce(_&_)
+  Broadcaster.io.signal := controls.io.signal && controls.io.signal_ack
 }
 
 object BFSPSgen extends App {

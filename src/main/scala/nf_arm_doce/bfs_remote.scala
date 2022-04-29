@@ -2,7 +2,7 @@ package remote
 
 import chisel3._
 import chisel3.experimental.ChiselEnum
-import chisel3.util.{Cat, Decoupled, Mux1H, MuxCase, log2Ceil}
+import chisel3.util.{Arbiter, Cat, Decoupled, Mux1H, MuxCase, log2Ceil}
 import nf_arm_doce._
 import utils._
 
@@ -111,8 +111,13 @@ class axis_data_collector(AXIS_DATA_WIDTH : Int = 64) extends Module   {
   when(mid.io.s_axis.tvalid.asBool()){
     when(mid.io.m_axis.tvalid.asBool()){
       when(out.io.s_axis.tvalid.asBool()){
-        mid.io.s_axis.tdata := VecInit(Seq.tabulate(32)(i => mid_data_in(i+16).tdata)).asUInt()
-        mid.io.s_axis.tkeep := VecInit(Seq.tabulate(32)(i => mid_data_in(i+16).tkeep)).asUInt()
+        when(mid_count < 16.U){
+          mid.io.s_axis.tdata := sorted_in.io.m_axis.tdata
+          mid.io.s_axis.tkeep := sorted_in.io.m_axis.tkeep
+        }.otherwise{
+          mid.io.s_axis.tdata := VecInit(Seq.tabulate(32)(i => mid_data_in(i+16).tdata)).asUInt()
+          mid.io.s_axis.tkeep := VecInit(Seq.tabulate(32)(i => mid_data_in(i+16).tkeep)).asUInt()
+        }
       }.otherwise{
         mid.io.s_axis.tdata := VecInit(mid_data_in.map(x=>x.tdata)).asUInt()
         mid.io.s_axis.tkeep := VecInit(mid_data_in.map(x=>x.tkeep)).asUInt()
@@ -143,6 +148,14 @@ class axis_data_collector(AXIS_DATA_WIDTH : Int = 64) extends Module   {
   io.empty := (in.io.m_axis.tvalid | mid.io.m_axis.tvalid | out.io.m_axis.tvalid | sorted_in.io.m_axis.tvalid) === false.B
 }
 
+class sync_msg (FPGA_Num : Int) extends Bundle() {
+  val flag = Bool()
+  val id = UInt(log2Ceil(FPGA_Num).W)
+  val level = UInt(4.W)
+  val reserved = UInt((32 - 1 - log2Ceil(FPGA_Num) - 4 - 24).W)
+  val size = UInt(24.W)
+}
+
 class Remote_Apply(AXIS_DATA_WIDTH: Int, Local_Scatter_Num: Int, FPGA_Num: Int, Remote_ID : Int) extends Module {
   val io = IO(new Bundle() {
     val xbar_in = Flipped(Decoupled(new axisdata(AXIS_DATA_WIDTH, 4)))
@@ -157,7 +170,11 @@ class Remote_Apply(AXIS_DATA_WIDTH: Int, Local_Scatter_Num: Int, FPGA_Num: Int, 
     val local_unvisited_size = Input(UInt(32.W))
     val end = Output(Bool())
     val packet_size = Input(UInt(32.W))
+    val level = Input(UInt(32.W))
   })
+
+  val level = RegInit(0.U(32.W))
+  level := io.level
 
   def vid_to_remote(vid: UInt) : Bool = {
     vid(log2Ceil(FPGA_Num) - 1, 0) === Remote_ID.U && vid(log2Ceil(FPGA_Num) - 1, 0) =/= io.local_fpga_id
@@ -189,8 +206,12 @@ class Remote_Apply(AXIS_DATA_WIDTH: Int, Local_Scatter_Num: Int, FPGA_Num: Int, 
     val flush = Value(0x5.U)
     val wait_data_flow = Value(0x6.U)
   }
-  val sync_data = (Cat(1.U(1.W), io.local_fpga_id) << (32 - 1 - log2Ceil(FPGA_Num))).asUInt() +
-    io.local_unvisited_size
+  val sync_data = Wire(new sync_msg(FPGA_Num))
+  sync_data.flag := (true.B)
+  sync_data.id := io.local_fpga_id
+  sync_data.level := level
+  sync_data.reserved := 0.U
+  sync_data.size := io.local_unvisited_size(23, 0)
   val sync_status = RegInit(sm.idole)
   val stall_time = RegInit(0.U(32.W))
   //stall until the local unvisited size is updated
@@ -207,7 +228,7 @@ class Remote_Apply(AXIS_DATA_WIDTH: Int, Local_Scatter_Num: Int, FPGA_Num: Int, 
     sync_status := sm.wait_sync_phase1
   }.elsewhen(sync_status === sm.wait_sync_phase1 && io.recv_sync_phase2){
     sync_status := sm.wait_data_flow
-  }.elsewhen(sync_status === sm.wait_data_flow && stall_time === 12.U){
+  }.elsewhen(sync_status === sm.wait_data_flow && stall_time === 30.U){
     sync_status := sm.output_fin_phase2
   }.elsewhen(sync_status === sm.output_fin_phase2 && vertex_in_fifo.io.s_axis.tready.asBool()){
     sync_status := sm.wait_signal
@@ -224,17 +245,23 @@ class Remote_Apply(AXIS_DATA_WIDTH: Int, Local_Scatter_Num: Int, FPGA_Num: Int, 
   vertex_in_fifo.io.s_axis.tvalid := (collector.io.out.valid) | need_to_send_sync
   vertex_in_fifo.io.s_axis.tkeep := Mux(need_to_send_sync, 1.U, collector.io.out.bits.tkeep)
   vertex_in_fifo.io.s_axis.tlast := 1.U
-  vertex_in_fifo.io.s_axis.tdata := Mux(need_to_send_sync, sync_data, collector.io.out.bits.tdata)
+  vertex_in_fifo.io.s_axis.tdata := Mux(need_to_send_sync, sync_data.asUInt(), collector.io.out.bits.tdata)
   collector.io.out.ready := vertex_in_fifo.io.s_axis.tready
 
   //vertex_in_fifo.io.m_axis.connectto(io.remote_out.bits, 0)
   val send_count = RegInit(0.U(32.W))
+  val pending_time = RegInit(0.U(32.W))
   io.remote_out.bits.tkeep := vertex_in_fifo.io.m_axis.tkeep
   io.remote_out.bits.tdata := vertex_in_fifo.io.m_axis.tdata
   io.remote_out.bits.tuser := Remote_ID.U
   io.remote_out.bits.tlast := send_count === (io.packet_size - 1.U) | vertex_in_fifo.io.axis_rd_data_count === 1.U
   io.remote_out.valid := false.B
   vertex_in_fifo.io.m_axis.tready := false.B
+  when(io.remote_out.valid && io.remote_out.ready && io.remote_out.bits.tlast){
+    pending_time := (io.packet_size << log2Ceil(FPGA_Num)).asUInt() - io.packet_size
+  }.elsewhen(pending_time =/= 0.U){
+    pending_time := pending_time - 1.U
+  }
   when(io.remote_out.valid && io.remote_out.ready){
     when(send_count === (io.packet_size - 1.U)){
       send_count := 0.U
@@ -245,8 +272,10 @@ class Remote_Apply(AXIS_DATA_WIDTH: Int, Local_Scatter_Num: Int, FPGA_Num: Int, 
   when(vertex_in_fifo.io.axis_rd_data_count >= io.packet_size && send_count === 0.U
   || (send_count =/= 0.U)
   || (sync_status =/= sm.idole)){
-    io.remote_out.valid := vertex_in_fifo.io.m_axis.tvalid
-    vertex_in_fifo.io.m_axis.tready := io.remote_out.ready
+    when(pending_time === 0.U){
+      io.remote_out.valid := vertex_in_fifo.io.m_axis.tvalid
+      vertex_in_fifo.io.m_axis.tready := io.remote_out.ready
+    }
   }
 }
 
@@ -352,21 +381,13 @@ class Remote_Scatter(AXI_ADDR_WIDTH : Int = 64, AXI_DATA_WIDTH: Int, AXI_ID_WIDT
     val local_fpga_id = Input(UInt(log2Ceil(FPGA_Num).W))
   })
 
-  def get_fpga_id(vid : UInt) : UInt = {
-    vid(30, 31 - log2Ceil(FPGA_Num))
-  }
-
-  def get_fpga_size(vid : UInt) : UInt = {
-    vid(30 - log2Ceil(FPGA_Num), 0)
-  }
-
   //tie off not used channel
   io.remote_in.ar.ready := false.B
   io.remote_in.aw.ready := true.B
   io.remote_in.r.bits.tie_off()
   io.remote_in.r.valid := false.B
 
-  val vertex_in_fifo = Module(new axis_data_fifo(AXIS_DATA_WIDTH, "remote_vid_fifo"))
+  val vertex_in_fifo = Module(new axis_data_uram_fifo(AXIS_DATA_WIDTH, "remote_vid_fifo"))
   vertex_in_fifo.io.s_axis_aclk := clock.asBool()
   vertex_in_fifo.io.s_axis_aresetn := ~reset.asBool()
   vertex_in_fifo.io.s_axis.tvalid := io.remote_in.w.valid
@@ -374,16 +395,17 @@ class Remote_Scatter(AXI_ADDR_WIDTH : Int = 64, AXI_DATA_WIDTH: Int, AXI_ID_WIDT
   vertex_in_fifo.io.s_axis.tdata := io.remote_in.w.bits.wdata
   io.remote_in.w.ready := vertex_in_fifo.io.s_axis.tready
 
+  val sync_data = vertex_in_fifo.io.m_axis.tdata(31, 0).asTypeOf(new sync_msg(FPGA_Num))
   val syncs = RegInit(VecInit(Seq.fill(FPGA_Num)(0.U(FPGA_Num.W))))
-  val is_sync = vertex_in_fifo.io.m_axis.tvalid.asBool() && vertex_in_fifo.io.m_axis.tdata(31) === 1.U &&
+  val is_sync = vertex_in_fifo.io.m_axis.tvalid.asBool() && sync_data.flag &&
     vertex_in_fifo.io.m_axis.tkeep(0) === 1.U && !io.issue_sync
   syncs.zipWithIndex.map{
     case(sync, i) => {
-      when(io.local_fpga_id === i.U){
+      when(io.local_fpga_id === i.U && io.start){
         sync := 2.U
-      }.elsewhen(is_sync && get_fpga_id(vertex_in_fifo.io.m_axis.tdata) === i.U){
+      }.elsewhen(is_sync && sync_data.id === i.U){
         sync := sync + 1.U
-      }.elsewhen(!io.start && io.signal){
+      }.elsewhen(!io.start && io.signal && io.local_fpga_id =/= i.U){
         sync := 0.U
       }
     }
@@ -391,6 +413,7 @@ class Remote_Scatter(AXI_ADDR_WIDTH : Int = 64, AXI_DATA_WIDTH: Int, AXI_ID_WIDT
   io.issue_sync_phase2 := VecInit(Seq.fill(FPGA_Num)(syncs.map(x=>(x > 0.U)).reduce(_&_)))
   io.issue_sync := syncs.map(x=>(x === 2.U)).reduce(_&_)
   vertex_in_fifo.io.m_axis.connectto(io.xbar_out.bits, 0)
+  io.xbar_out.bits.tlast := true.B
   vertex_in_fifo.io.m_axis.tready := MuxCase(io.xbar_out.ready, Array(
     io.issue_sync -> false.B,
     is_sync -> true.B
@@ -402,7 +425,7 @@ class Remote_Scatter(AXI_ADDR_WIDTH : Int = 64, AXI_DATA_WIDTH: Int, AXI_ID_WIDT
 
   val unvisited_size_reg = RegInit(0.U(32.W))
   when(is_sync){
-    unvisited_size_reg := unvisited_size_reg + get_fpga_size(vertex_in_fifo.io.m_axis.tdata)
+    unvisited_size_reg := unvisited_size_reg + sync_data.size
   }.elsewhen(!io.start && io.signal){
     unvisited_size_reg := 0.U
   }
@@ -427,9 +450,13 @@ class Remote_Scatter(AXI_ADDR_WIDTH : Int = 64, AXI_DATA_WIDTH: Int, AXI_ID_WIDT
 class Remote_xbar(AXIS_DATA_WIDTH: Int, SLAVE_NUM: Int, MASTER_NUM: Int, FPGA_Num : Int) extends Module {
   val io = IO(new Bundle {
     val ddr_in = Vec(MASTER_NUM, Flipped(Decoupled(new axisdata(AXIS_DATA_WIDTH, 4))))
-    val pe_out = Vec(SLAVE_NUM, Decoupled(new axisdata(AXIS_DATA_WIDTH * MASTER_NUM + 64, 4)))
+    val pe_out = Vec(SLAVE_NUM, Decoupled(new axisdata(64, 4)))
     val remote_out = Vec(FPGA_Num, Decoupled(new axisdata(64, 4)))
     val remote_in = Flipped(Decoupled(new axisdata(64, 4)))
+
+    val local_fpga_id = Input(UInt(log2Ceil(FPGA_Num).W))
+    val flush = Input(Bool())
+    val signal = Input(Bool())
   })
 
   assert(AXIS_DATA_WIDTH * MASTER_NUM == 64)
@@ -446,18 +473,22 @@ class Remote_xbar(AXIS_DATA_WIDTH: Int, SLAVE_NUM: Int, MASTER_NUM: Int, FPGA_Nu
     case(in, i) => {in.ready := combiner_level0.io.s_axis.tready(i)}
   }
 
-  val buffer0 = Module(new axis_data_fifo(AXIS_DATA_WIDTH * MASTER_NUM, "Remote_xbar_buffer0"))
-  buffer0.io.s_axis_aclk := clock.asBool()
-  buffer0.io.s_axis_aresetn := ~reset.asBool()
-  buffer0.io.s_axis <> combiner_level0.io.m_axis
+  val frontend = Module(new axis_reg_slice(64, "Remote_xbar_reg_slice"))
+  frontend.io.aclk := clock.asBool()
+  frontend.io.aresetn := ~reset.asBool()
+  frontend.io.s_axis.tvalid := combiner_level0.io.m_axis.tvalid
+  frontend.io.s_axis.tdata := combiner_level0.io.m_axis.tdata
+  frontend.io.s_axis.tkeep := combiner_level0.io.m_axis.tkeep
+  frontend.io.s_axis.tlast := combiner_level0.io.m_axis.tlast
+  combiner_level0.io.m_axis.tready := frontend.io.s_axis.tready
 
   val xbar_level0 = Module(new axis_broadcaster(64, 1 + FPGA_Num, "axis_broadcaster_level0"))
   xbar_level0.io.aclk := clock.asBool()
   xbar_level0.io.aresetn := ~reset.asBool()
-  xbar_level0.io.s_axis.tdata := buffer0.io.m_axis.tdata
-  xbar_level0.io.s_axis.tvalid := buffer0.io.m_axis.tvalid
-  xbar_level0.io.s_axis.tkeep := VecInit(buffer0.io.m_axis.tkeep.asBools().map{x => x & buffer0.io.m_axis.tvalid}).asUInt()
-  buffer0.io.m_axis.tready := xbar_level0.io.s_axis.tready
+  xbar_level0.io.s_axis.tdata := frontend.io.m_axis.tdata
+  xbar_level0.io.s_axis.tvalid := frontend.io.m_axis.tvalid
+  xbar_level0.io.s_axis.tkeep := VecInit(frontend.io.m_axis.tkeep.asBools().map{x => x & frontend.io.m_axis.tvalid}).asUInt()
+  frontend.io.m_axis.tready := xbar_level0.io.s_axis.tready
   io.remote_out.zipWithIndex.map{
     case (r, i) => {
       xbar_level0.io.m_axis.connectto(r.bits, i+1)
@@ -465,29 +496,74 @@ class Remote_xbar(AXIS_DATA_WIDTH: Int, SLAVE_NUM: Int, MASTER_NUM: Int, FPGA_Nu
     }
   }
 
-  val combiner_level1 = Module(new axis_combiner(64, 2, "axis_combiner_level1"))
-  combiner_level1.io.aclk := clock.asBool()
-  combiner_level1.io.aresetn := ~reset.asBool()
-  combiner_level1.io.s_axis.tdata := Cat(xbar_level0.io.m_axis.tdata(511, 0), io.remote_in.bits.tdata)
-  combiner_level1.io.s_axis.tkeep := Cat(xbar_level0.io.m_axis.tkeep(63, 0),
-    VecInit(io.remote_in.bits.tkeep.asBools().map{x => x & io.remote_in.valid}).asUInt())
-  combiner_level1.io.s_axis.tlast := 3.U
-  combiner_level1.io.s_axis.tvalid := VecInit(Seq.fill(2)(xbar_level0.io.m_axis.tvalid(0) | io.remote_in.valid)).asUInt()
-  io.remote_in.ready := combiner_level1.io.s_axis.tready(0)
-  xbar_level0.io.m_axis.tready := Cat(VecInit(io.remote_out.map(x=>x.ready)).asUInt(), combiner_level1.io.s_axis.tready(1))
+  def vid_to_local(vid: UInt) : Bool = {
+    vid(log2Ceil(FPGA_Num) - 1, 0) === io.local_fpga_id
+  }
 
-  val buffer1 = Module(new axis_data_fifo(64*2, "Remote_xbar_buffer1"))
+  val filtered_keep = Wire(Vec(64 / 4, Bool()))
+  filtered_keep.zipWithIndex.map{
+    case(k, i) => {
+      k := Mux(xbar_level0.io.m_axis.tkeep(i),
+        Mux(xbar_level0.io.m_axis.tdata(i*32 + 31), true.B, vid_to_local(xbar_level0.io.m_axis.tdata(i*32+31, i*32))),
+        false.B)
+    }
+  }
+
+  val flush_reg = RegInit(false.B)
+  when(io.signal){
+    flush_reg := false.B
+  }.elsewhen(io.flush){
+    flush_reg := true.B
+  }
+  val collector = Module(new axis_data_collector(64))
+  collector.io.in.valid := xbar_level0.io.m_axis.tvalid(0)
+  collector.io.in.bits.tkeep := filtered_keep.asUInt()
+  collector.io.in.bits.tdata := xbar_level0.io.m_axis.tdata(511, 0)
+  collector.io.in.bits.tlast := true.B
+  xbar_level0.io.m_axis.tready := Cat(VecInit(io.remote_out.map(x=>x.ready)).asUInt(), collector.io.in.ready)
+  collector.io.flush := flush_reg
+
+  val buffer1 = Module(new axis_data_fifo(64, "Remote_xbar_buffer1"))
   buffer1.io.s_axis_aclk := clock.asBool()
   buffer1.io.s_axis_aresetn := ~reset.asBool()
-  buffer1.io.s_axis <> combiner_level1.io.m_axis
+  buffer1.io.s_axis.connectfrom(collector.io.out.bits)
+  buffer1.io.s_axis.tvalid := collector.io.out.valid
+  collector.io.out.ready := buffer1.io.s_axis.tready
 
-  val xbar_level1 = Module(new axis_broadcaster(128, SLAVE_NUM, "axis_broadcaster_level1"))
+  val switch_level1 = Module(new Arbiter(new axisdata(64), 2))
+  buffer1.io.m_axis.connectto(switch_level1.io.in(1).bits, 0)
+  switch_level1.io.in(1).valid := buffer1.io.m_axis.tvalid
+  buffer1.io.m_axis.tready := switch_level1.io.in(1).ready
+  io.remote_in <> switch_level1.io.in(0)
+
+  //filter out replication data
+  val in_data = switch_level1.io.out.bits.tdata.asTypeOf(Vec(16, UInt((32).W)))
+  val in_keep = VecInit(switch_level1.io.out.bits.tkeep(15, 0).asBools())
+  val replication = VecInit(Seq.fill(16)(false.B))
+  replication.tail.zipWithIndex.map{
+    case(r, i) => {
+      print(i)
+      r := in_data.zip(in_keep).slice(0, i+1).map {
+        case (x, k) => (x === in_data(i + 1)) & k
+      }.reduce(_|_)
+    }
+  }
+  val backend = Module(new axis_reg_slice(64, "Remote_xbar_reg_slice"))
+  backend.io.aclk := clock.asBool()
+  backend.io.aresetn := ~reset.asBool()
+  backend.io.s_axis.tvalid := switch_level1.io.out.valid
+  backend.io.s_axis.tdata := switch_level1.io.out.bits.tdata
+  backend.io.s_axis.tlast := switch_level1.io.out.bits.tlast
+  backend.io.s_axis.tkeep := switch_level1.io.out.bits.tkeep & VecInit(replication.map(!_)).asUInt()
+  switch_level1.io.out.ready := backend.io.s_axis.tready
+
+  val xbar_level1 = Module(new axis_broadcaster(64, SLAVE_NUM, "axis_broadcaster_level1"))
   xbar_level1.io.aclk := clock.asBool()
   xbar_level1.io.aresetn := ~reset.asBool()
-  xbar_level1.io.s_axis.tdata := buffer1.io.m_axis.tdata
-  xbar_level1.io.s_axis.tvalid := buffer1.io.m_axis.tvalid
-  xbar_level1.io.s_axis.tkeep := VecInit(buffer1.io.m_axis.tkeep.asBools().map{x => x & buffer1.io.m_axis.tvalid}).asUInt()
-  buffer1.io.m_axis.tready := xbar_level1.io.s_axis.tready
+  xbar_level1.io.s_axis.tdata := backend.io.m_axis.tdata
+  xbar_level1.io.s_axis.tvalid := backend.io.m_axis.tvalid
+  xbar_level1.io.s_axis.tkeep := VecInit(backend.io.m_axis.tkeep.asBools().map{x => x & backend.io.m_axis.tvalid}).asUInt()
+  backend.io.m_axis.tready := xbar_level1.io.s_axis.tready
   io.pe_out.zipWithIndex.map{
     case(pe, i) => {
       xbar_level1.io.m_axis.connectto(pe.bits, i)

@@ -328,6 +328,18 @@ class axis_data_user_fifo (AXIS_DATA_WIDTH: Int, val mname : String, AXIS_USER_W
   override def desiredName = mname
 }
 
+class axis_data_uram_fifo (AXIS_DATA_WIDTH: Int, val mname : String) extends BlackBox{
+  val io = IO(new Bundle() {
+    val s_axis_aclk = Input(Bool())
+    val s_axis_aresetn = Input(Bool())
+    val s_axis = new streamdata_bare_blackbox(AXIS_DATA_WIDTH, 1, 1)
+    val m_axis = Flipped(new streamdata_bare_blackbox(AXIS_DATA_WIDTH, 1, 1))
+
+  })
+
+  override def desiredName = mname
+}
+
 class axis_switch (AXIS_DATA_WIDTH: Int, NUM : Int, val mname : String, AXIS_USER_WIDTH: Int = 1) extends BlackBox{
   val io = IO(new Bundle() {
     val aclk = Input(Bool())
@@ -400,4 +412,19 @@ class axis_reg_slice(AXIS_DATA_WIDTH: Int, val mname : String) extends BlackBox{
   })
 
   override def desiredName = mname
+}
+
+class sample_max(MaxValue : Int) extends Module{
+  val io = IO(new Bundle() {
+    val enable = Input(Bool())
+    val clear = Input(Bool())
+  })
+
+  val (a, b) = Counter(Range(0, MaxValue), io.enable, io.clear)
+
+  val max = RegInit(0.U(32.W))
+  dontTouch(max)
+  when(a > max){
+    max := a
+  }
 }
