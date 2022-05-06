@@ -530,11 +530,20 @@ class Remote_xbar(AXIS_DATA_WIDTH: Int, SLAVE_NUM: Int, MASTER_NUM: Int, FPGA_Nu
   buffer1.io.s_axis.tvalid := collector.io.out.valid
   collector.io.out.ready := buffer1.io.s_axis.tready
 
+  val remote_in_reg = Module(new axis_reg_slice(64, "Remote_xbar_reg_slice"))
+  remote_in_reg.io.aclk := clock.asBool()
+  remote_in_reg.io.aresetn := ~reset.asBool()
+  remote_in_reg.io.s_axis.connectfrom(io.remote_in.bits)
+  io.remote_in.ready := remote_in_reg.io.s_axis.tready
+  remote_in_reg.io.s_axis.tvalid := io.remote_in.valid
+
   val switch_level1 = Module(new Arbiter(new axisdata(64), 2))
   buffer1.io.m_axis.connectto(switch_level1.io.in(1).bits, 0)
   switch_level1.io.in(1).valid := buffer1.io.m_axis.tvalid
   buffer1.io.m_axis.tready := switch_level1.io.in(1).ready
-  io.remote_in <> switch_level1.io.in(0)
+  remote_in_reg.io.m_axis.connectto(switch_level1.io.in(0).bits, 0)
+  switch_level1.io.in(0).valid := remote_in_reg.io.m_axis.tvalid
+  remote_in_reg.io.m_axis.tready := switch_level1.io.in(0).ready
 
   //filter out replication data
   val in_data = switch_level1.io.out.bits.tdata.asTypeOf(Vec(16, UInt((32).W)))
@@ -548,29 +557,42 @@ class Remote_xbar(AXIS_DATA_WIDTH: Int, SLAVE_NUM: Int, MASTER_NUM: Int, FPGA_Nu
       }.reduce(_|_)
     }
   }
-  val backend = Module(new axis_reg_slice(64, "Remote_xbar_reg_slice"))
-  backend.io.aclk := clock.asBool()
-  backend.io.aresetn := ~reset.asBool()
-  backend.io.s_axis.tvalid := switch_level1.io.out.valid
-  backend.io.s_axis.tdata := switch_level1.io.out.bits.tdata
-  backend.io.s_axis.tlast := switch_level1.io.out.bits.tlast
-  backend.io.s_axis.tkeep := switch_level1.io.out.bits.tkeep & VecInit(replication.map(!_)).asUInt()
-  switch_level1.io.out.ready := backend.io.s_axis.tready
+  val mid = Module(new axis_reg_slice(64, "Remote_xbar_reg_slice"))
+  mid.io.aclk := clock.asBool()
+  mid.io.aresetn := ~reset.asBool()
+  mid.io.s_axis.tvalid := switch_level1.io.out.valid
+  mid.io.s_axis.tdata := switch_level1.io.out.bits.tdata
+  mid.io.s_axis.tlast := switch_level1.io.out.bits.tlast
+  mid.io.s_axis.tkeep := switch_level1.io.out.bits.tkeep & VecInit(replication.map(!_)).asUInt()
+  switch_level1.io.out.ready := mid.io.s_axis.tready
 
   val xbar_level1 = Module(new axis_broadcaster(64, SLAVE_NUM, "axis_broadcaster_level1"))
   xbar_level1.io.aclk := clock.asBool()
   xbar_level1.io.aresetn := ~reset.asBool()
-  xbar_level1.io.s_axis.tdata := backend.io.m_axis.tdata
-  xbar_level1.io.s_axis.tvalid := backend.io.m_axis.tvalid
-  xbar_level1.io.s_axis.tkeep := VecInit(backend.io.m_axis.tkeep.asBools().map{x => x & backend.io.m_axis.tvalid}).asUInt()
-  backend.io.m_axis.tready := xbar_level1.io.s_axis.tready
-  io.pe_out.zipWithIndex.map{
-    case(pe, i) => {
-      xbar_level1.io.m_axis.connectto(pe.bits, i)
-      pe.valid := xbar_level1.io.m_axis.tvalid(i)
+  xbar_level1.io.s_axis.tdata := mid.io.m_axis.tdata
+  xbar_level1.io.s_axis.tvalid := mid.io.m_axis.tvalid
+  xbar_level1.io.s_axis.tkeep := VecInit(mid.io.m_axis.tkeep.asBools().map{x => x & mid.io.m_axis.tvalid}).asUInt()
+  mid.io.m_axis.tready := xbar_level1.io.s_axis.tready
+
+  val backend = Seq.fill(SLAVE_NUM)(Module(new axis_reg_slice(64, "Remote_xbar_reg_slice")))
+  backend.zipWithIndex.map{
+    case(b, i) => {
+      b.io.aclk := clock.asBool()
+      b.io.aresetn := !reset.asBool()
+      b.io.s_axis.tdata := xbar_level1.io.m_axis.tdata(512 * (i + 1) - 1, 512 * i)
+      b.io.s_axis.tkeep := xbar_level1.io.m_axis.tkeep(64 * (i + 1) - 1, 64 * i)
+      b.io.s_axis.tlast := xbar_level1.io.m_axis.tlast(i)
+      b.io.s_axis.tvalid := xbar_level1.io.m_axis.tvalid(i)
     }
   }
   xbar_level1.io.m_axis.tready := (VecInit.tabulate(SLAVE_NUM)(
-    i => io.pe_out(i).ready
+    i => backend(i).io.s_axis.tready
   )).asUInt()
+  io.pe_out.zipWithIndex.map{
+    case(pe, i) => {
+      backend(i).io.m_axis.connectto(pe.bits, 0)
+      pe.valid := backend(i).io.m_axis.tvalid
+      backend(i).io.m_axis.tready := pe.ready
+    }
+  }
 }

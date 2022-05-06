@@ -339,21 +339,21 @@ class Gather(AXI_DATA_WIDTH: Int = 64, Broadcast_Num: Int) extends Module{
   broadcaster.io.aresetn := ~reset.asBool()
   broadcaster.io.aclk := clock.asBool()
 
-  val v2Apply_fifo = Module(new axis_data_fifo(AXI_DATA_WIDTH, "v2A_fifo"))
-  v2Apply_fifo.io.s_axis_aclk := clock.asBool()
-  v2Apply_fifo.io.s_axis_aresetn := ~reset.asBool()
+  val v2Apply_fifo = Module(new axis_reg_slice(AXI_DATA_WIDTH, "v2A_reg_slice"))
+  v2Apply_fifo.io.aclk := clock.asBool()
+  v2Apply_fifo.io.aresetn := ~reset.asBool()
   v2Apply_fifo.io.s_axis.tdata := broadcaster.io.m_axis.tdata(AXI_DATA_WIDTH * 8 * (Broadcast_Num + 1) - 1, AXI_DATA_WIDTH * 8 * Broadcast_Num)
   v2Apply_fifo.io.s_axis.tvalid := broadcaster.io.m_axis.tvalid(Broadcast_Num)
   v2Apply_fifo.io.s_axis.tkeep := broadcaster.io.m_axis.tkeep(AXI_DATA_WIDTH * (Broadcast_Num + 1) - 1, AXI_DATA_WIDTH * Broadcast_Num)
   v2Apply_fifo.io.s_axis.tlast := broadcaster.io.m_axis.tlast(Broadcast_Num)
 
   val v2Broadcast_fifo = Seq.tabulate(Broadcast_Num)(
-    i => Module(new axis_data_fifo(AXI_DATA_WIDTH / Broadcast_Num, "v2B_fifo"))
+    i => Module(new axis_reg_slice(AXI_DATA_WIDTH / Broadcast_Num, "v2B_reg_slice"))
   )
   v2Broadcast_fifo.zipWithIndex.map{
     case (b, i) => {
-      b.io.s_axis_aresetn := ~reset.asBool()
-      b.io.s_axis_aclk := clock.asBool()
+      b.io.aresetn := ~reset.asBool()
+      b.io.aclk := clock.asBool()
       b.io.s_axis.tdata := VecInit(broadcaster.io.m_axis.tdata(AXI_DATA_WIDTH * 8 * (i + 1) - 1, AXI_DATA_WIDTH * 8 * i).
         asTypeOf(Vec(Broadcast_Num, UInt((AXI_DATA_WIDTH * 8 / Broadcast_Num).W))).map{
         x => x((AXI_DATA_WIDTH * 8 / Broadcast_Num) / Broadcast_Num * (i + 1) - 1, (AXI_DATA_WIDTH * 8 / Broadcast_Num) / Broadcast_Num * i)
@@ -648,20 +648,23 @@ class Broadcast(AXI_ADDR_WIDTH : Int = 64, AXI_DATA_WIDTH: Int, AXI_ID_WIDTH: In
     }
   }
 
-  val vertex_out_fifo = Module(new BRAM_fifo(32, AXI_DATA_WIDTH * 8 + KEEP_WIDTH, "edge_fifo"))
-  vertex_out_fifo.io.srst := reset.asBool()
-  vertex_out_fifo.io.clk := clock.asBool()
-  io.xbar_out.valid := vertex_out_fifo.is_valid()
-  io.xbar_out.bits.tkeep := vertex_out_fifo.io.dout(KEEP_WIDTH - 1, 0)
-  io.xbar_out.bits.tdata := vertex_out_fifo.io.dout(AXI_DATA_WIDTH * 8 + KEEP_WIDTH - 1, KEEP_WIDTH)
-  io.xbar_out.bits.tlast := true.B
-  vertex_out_fifo.io.rd_en := io.xbar_out.ready
-  vertex_out_fifo.io.wr_en := r_demux_out(0).valid | upward_status === upward_sm.output_fin | io.start
-  vertex_out_fifo.io.din := MuxCase(Cat(r_demux_out(0).bits.rdata, keep.asUInt()), Array(
-    io.start -> Cat(io.root, 0x1.U(KEEP_WIDTH.W)),
-    (upward_status === upward_sm.output_fin) -> Cat("x80000000".asUInt((AXI_DATA_WIDTH * 8).W), 0x1.U(KEEP_WIDTH.W))
+  val vertex_out_fifo = Module(new axis_data_count_fifo(AXI_DATA_WIDTH, "edge_fifo"))
+  vertex_out_fifo.io.s_axis_aresetn := !reset.asBool()
+  vertex_out_fifo.io.s_axis_aclk := clock.asBool()
+  vertex_out_fifo.io.m_axis.connectto(io.xbar_out.bits, 0)
+  io.xbar_out.valid := vertex_out_fifo.io.m_axis.tvalid
+  vertex_out_fifo.io.m_axis.tready := io.xbar_out.ready
+  vertex_out_fifo.io.s_axis.tvalid := r_demux_out(0).valid | upward_status === upward_sm.output_fin | io.start
+  vertex_out_fifo.io.s_axis.tdata := MuxCase(r_demux_out(0).bits.rdata, Array(
+    io.start -> io.root,
+    (upward_status === upward_sm.output_fin) -> "x80000000".asUInt((AXI_DATA_WIDTH * 8).W)
   ))
-  r_demux_out(0).ready := vertex_out_fifo.io.full === false.B
+  vertex_out_fifo.io.s_axis.tkeep := MuxCase(keep.asUInt(), Array(
+    io.start -> 0x1.U(KEEP_WIDTH.W),
+    (upward_status === upward_sm.output_fin) -> 0x1.U(KEEP_WIDTH.W)
+  ))
+  vertex_out_fifo.io.s_axis.tlast := true.B
+  r_demux_out(0).ready := vertex_out_fifo.io.s_axis.tready
 
   //control path
   val syncRecv = RegInit(VecInit(Seq.fill(Broadcast_Num)(false.B)))
@@ -834,13 +837,13 @@ class Scatter(AXIS_DATA_WIDTH: Int = 4, SID: Int, AXI_DATA_WIDTH: Int,
   arbi.io.xbar_in.valid := vertex_in_fifo.io.m_axis.tvalid
   vertex_in_fifo.io.m_axis.tready := arbi.io.xbar_in.ready
 
-  val vertex_out_fifo = Module(new BRAM_fifo(32, 32, "vid_fifo"))
-  vertex_out_fifo.io.clk := clock.asBool()
-  vertex_out_fifo.io.srst := reset.asBool()
+  val vertex_out_fifo = Module(new axis_reg_slice(4, "scatter_out_reg_slice"))
+  vertex_out_fifo.io.aclk := clock.asBool()
+  vertex_out_fifo.io.aresetn := ~reset.asBool()
 
   //read or write bitmap ehnr this is not FIN
   val bitmap_arvalid = arbi.io.ddr_out.valid
-  val halt = vertex_out_fifo.io.full === true.B
+  val halt = vertex_out_fifo.io.s_axis.tready === false.B
   val bitmap_wait = Module(new pipeline(UInt(32.W)))
   bitmap_wait.io.din.valid := bitmap_arvalid
   bitmap_wait.io.din.bits := arbi.io.ddr_out.bits.tdata
@@ -871,21 +874,21 @@ class Scatter(AXIS_DATA_WIDTH: Int = 4, SID: Int, AXI_DATA_WIDTH: Int,
   bitmap.io.enb :=  true.B//bitmap_arvalid
   bitmap.io.addrb := vid2bitmap_addr(arbi.io.ddr_out.bits.tdata)
   bitmap.io.clkb := clock.asBool()
-  vertex_out_fifo.io.wr_en := bitmap_write_addr.io.dout.valid
-  vertex_out_fifo.io.din := bitmap_write_addr.io.dout.bits
+  vertex_out_fifo.io.s_axis.tvalid := bitmap_write_addr.io.dout.valid
+  vertex_out_fifo.io.s_axis.tdata := bitmap_write_addr.io.dout.bits
   bitmap.io.ena := true.B
   bitmap.io.wea := bitmap_write_addr.io.dout.valid & bitmap_write_addr.io.dout.bits(31) === 0.U(1.W)
   bitmap.io.clka := clock.asBool()
   bitmap.io.dina := bitmap_write_data.io.dout.bits
   bitmap.io.addra := vid2bitmap_addr(bitmap_write_addr.io.dout.bits)
-  vertex_out_fifo.io.rd_en := io.ddr_out.ready //| vertex_out_fifo.test_FIN()
-  io.ddr_out.valid := vertex_out_fifo.is_valid() & vertex_out_fifo.io.dout(31) === 0.U
+  vertex_out_fifo.io.m_axis.tready := io.ddr_out.ready //| vertex_out_fifo.test_FIN()
+  io.ddr_out.valid := vertex_out_fifo.io.m_axis.tvalid & vertex_out_fifo.io.m_axis.tdata(31) === 0.U
   io.ddr_out.bits.tkeep := true.B
   io.ddr_out.bits.tlast := true.B
-  io.ddr_out.bits.tdata := vertex_out_fifo.io.dout
+  io.ddr_out.bits.tdata := vertex_out_fifo.io.m_axis.tdata
 
   //control path
-  io.end := vertex_out_fifo.test_FIN()
+  io.end := vertex_out_fifo.io.m_axis.tvalid & vertex_out_fifo.io.m_axis.tdata(31) === 1.U
 
   val ready_counter = RegInit(0.U(32.W))
   dontTouch(ready_counter)
@@ -895,11 +898,11 @@ class Scatter(AXIS_DATA_WIDTH: Int = 4, SID: Int, AXI_DATA_WIDTH: Int,
 }
 
 //TODO: Try to use fifoIO
-class multi_channel_fifo(AXI_DATA_WIDTH: Int = 64, size : Int = 16, val Scatter_num : Int) extends Module{
+class multi_channel_fifo(AXI_DATA_WIDTH: Int = 64, size : Int, val Scatter_num : Int) extends Module{
   val io = IO(new Bundle() {
     val in = Vec(Scatter_num, Flipped(Decoupled(new axisdata(4, 4))))
     val out = new Bundle() {
-      val full = Output(Bool())
+      val almost_full = Output(Bool())
       val din = Input(UInt((8 * AXI_DATA_WIDTH).W))
       val wr_en = Input(Bool())
       val dout = Output(UInt((8 * AXI_DATA_WIDTH).W))
@@ -922,10 +925,10 @@ class multi_channel_fifo(AXI_DATA_WIDTH: Int = 64, size : Int = 16, val Scatter_
   }
 
   val collector_fifos = Seq.tabulate(16)(
-    i => Module(new BRAM_fifo(16, 32, ("collector_fifo_0")))
+    i => Module(new BRAM_fifo(size, 32, ("collector_fifo_0")))
   )
   val fifos_ready = Seq.tabulate(16)(i => collector_fifos(i).io.full === false.B).reduce(_&_)
-  val counter = RegInit(0.U(log2Ceil(16).W))
+  val counter = RegInit(0.U((log2Ceil(size) + 1).W))
   val collector_data = Wire(Vec(16, UInt(32.W)))
   val in_pipeline = Seq.fill(Scatter_num)(
     Module(new axis_reg_slice(4, "multi_channel_fifo_reg_slice"))
@@ -978,8 +981,12 @@ class multi_channel_fifo(AXI_DATA_WIDTH: Int = 64, size : Int = 16, val Scatter_
 
   io.out.valid := Seq.tabulate(16)(i => collector_fifos(i).is_valid()).reduce(_|_)
   io.out.dout := collector_data.asUInt()
-  io.out.data_count := collector_fifos.map{i => i.io.data_count.asTypeOf(UInt((log2Ceil(size * AXI_DATA_WIDTH / 4) + 1).W))}.reduce(_+_)
-  io.out.full := ~fifos_ready
+  io.out.data_count := collector_fifos.map{
+    i => i.io.data_count.asTypeOf(UInt((log2Ceil(size * AXI_DATA_WIDTH / 4) + 1).W))
+  }.reduce(_+_)
+  io.out.almost_full := collector_fifos.map{
+    i => (i.io.data_count > 16.U)
+  }.reduce(_&_)
 
   val ready_counter = RegInit(0.U(32.W))
   dontTouch(ready_counter)
@@ -1009,7 +1016,7 @@ class multi_port_mc(AXI_ADDR_WIDTH : Int = 64, AXI_DATA_WIDTH: Int = 64, AXI_ID_
     val signal_ack = Output(Bool())
   })
 
-  val tier_fifo = Seq.tabulate(2)(i => Module(new multi_channel_fifo(AXI_DATA_WIDTH, 16, Scatter_num)))
+  val tier_fifo = Seq.tabulate(2)(i => Module(new multi_channel_fifo(AXI_DATA_WIDTH, 512, Scatter_num)))
   val tier_counter = RegInit(VecInit(Seq.fill(2)(0.U(32.W))))
 
   object sm extends ChiselEnum {
@@ -1103,7 +1110,7 @@ class multi_port_mc(AXI_ADDR_WIDTH : Int = 64, AXI_DATA_WIDTH: Int = 64, AXI_ID_
   }
   tier_status.zipWithIndex.map{
     case (s, i) => {
-      when(next_tier_mask(i) && tier_fifo(i).io.out.full && s === sm.idole){
+      when(next_tier_mask(i) && tier_fifo(i).io.out.almost_full && s === sm.idole){
         s := sm.writeback
       }.elsewhen(!next_tier_mask(i) && tier_fifo(i).is_empty() && tier_counter(i) =/= 0.U && s === sm.idole){
         s := sm.readback

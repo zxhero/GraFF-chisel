@@ -51,7 +51,7 @@ class BFS_ps(AXI_ADDR_WIDTH : Int = 64, AXI_DATA_WIDTH: Int = 64, AXI_ID_WIDTH: 
   ))
   val ReScatter = Module(new Remote_Scatter(AXI_ADDR_WIDTH, 64, 6, 3,
     64, 4))
-  val ReSwtich = Module(new axis_to_axi(64, 64, 6, 3,
+  val ReSwitch = Module(new axis_to_axi(64, 64, 6, 3,
     64, 4))
 
   io.PLmemory <> MemController.io.ddr_out
@@ -80,10 +80,10 @@ class BFS_ps(AXI_ADDR_WIDTH : Int = 64, AXI_DATA_WIDTH: Int = 64, AXI_ID_WIDTH: 
   ReApplys.zipWithIndex.map{
     case (r, i) => {
       r.io.xbar_in <> Broadcaster.io.remote_out(i)
-      ReSwtich.io.xbar_in(i) <> r.io.remote_out
+      ReSwitch.io.xbar_in(i) <> r.io.remote_out
     }
   }
-  io.Re_memory_out <> ReSwtich.io.remote_out
+  io.Re_memory_out <> ReSwitch.io.remote_out
 
   //tie off unnecessary ports
   io.PSmemory.map{
@@ -146,7 +146,7 @@ class BFS_ps(AXI_ADDR_WIDTH : Int = 64, AXI_DATA_WIDTH: Int = 64, AXI_ID_WIDTH: 
   ReScatter.io.start := controls.io.start
   ReScatter.io.signal := controls.io.signal && controls.io.signal_ack
   ReScatter.io.local_fpga_id := controls.GetRegByName("fpga_id")
-  ReSwtich.io.level_base_addr := VecInit(Seq.tabulate(4)(
+  ReSwitch.io.level_base_addr := VecInit(Seq.tabulate(4)(
     x => Cat(controls.GetRegByName("Rlevel_hi_"+x.toString),
       controls.GetRegByName("Rlevel_lo_"+x.toString))
   ))

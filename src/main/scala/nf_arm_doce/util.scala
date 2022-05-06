@@ -315,6 +315,10 @@ class axis_data_count_fifo (AXIS_DATA_WIDTH: Int, val mname : String) extends Bl
   })
 
   override def desiredName = mname
+
+  def is_empty() : Bool = {
+    io.axis_rd_data_count === 0.U
+  }
 }
 
 class axis_data_user_fifo (AXIS_DATA_WIDTH: Int, val mname : String, AXIS_USER_WIDTH: Int = 1) extends BlackBox{
