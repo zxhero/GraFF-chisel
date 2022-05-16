@@ -305,7 +305,58 @@ class axis_data_fifo (AXIS_DATA_WIDTH: Int, val mname : String, AXIS_ID_WIDTH: I
   override def desiredName = mname
 }
 
-private object ArbiterCtrl {
+class axis_data_count_fifo (AXIS_DATA_WIDTH: Int, val mname : String) extends BlackBox{
+  val io = IO(new Bundle() {
+    val s_axis_aclk = Input(Bool())
+    val s_axis_aresetn = Input(Bool())
+    val s_axis = new streamdata_blackbox(AXIS_DATA_WIDTH, 1, 1)
+    val m_axis = Flipped(new streamdata_blackbox(AXIS_DATA_WIDTH, 1, 1))
+    val axis_rd_data_count = Output(UInt(32.W))
+  })
+
+  override def desiredName = mname
+
+  def is_empty() : Bool = {
+    io.axis_rd_data_count === 0.U
+  }
+}
+
+class axis_data_user_fifo (AXIS_DATA_WIDTH: Int, val mname : String, AXIS_USER_WIDTH: Int = 1) extends BlackBox{
+  val io = IO(new Bundle() {
+    val s_axis_aclk = Input(Bool())
+    val s_axis_aresetn = Input(Bool())
+    val s_axis = new streamdata_user_blackbox(AXIS_DATA_WIDTH, 1, 1, AXIS_USER_WIDTH)
+    val m_axis = Flipped(new streamdata_user_blackbox(AXIS_DATA_WIDTH, 1, 1, AXIS_USER_WIDTH))
+  })
+
+  override def desiredName = mname
+}
+
+class axis_data_uram_fifo (AXIS_DATA_WIDTH: Int, val mname : String) extends BlackBox{
+  val io = IO(new Bundle() {
+    val s_axis_aclk = Input(Bool())
+    val s_axis_aresetn = Input(Bool())
+    val s_axis = new streamdata_bare_blackbox(AXIS_DATA_WIDTH, 1, 1)
+    val m_axis = Flipped(new streamdata_bare_blackbox(AXIS_DATA_WIDTH, 1, 1))
+
+  })
+
+  override def desiredName = mname
+}
+
+class axis_switch (AXIS_DATA_WIDTH: Int, NUM : Int, val mname : String, AXIS_USER_WIDTH: Int = 1) extends BlackBox{
+  val io = IO(new Bundle() {
+    val aclk = Input(Bool())
+    val aresetn = Input(Bool())
+    val s_axis = new streamdata_user_blackbox(AXIS_DATA_WIDTH, 1, NUM, AXIS_USER_WIDTH)
+    val m_axis = Flipped(new streamdata_user_blackbox(AXIS_DATA_WIDTH, 1, 1, AXIS_USER_WIDTH))
+    val s_req_suppress = Input(UInt(NUM.W))
+  })
+
+  override def desiredName = mname
+}
+
+object AMBA_ArbiterCtrl {
   def apply(request: Seq[Bool]): Seq[Bool] = request.length match {
     case 0 => Seq()
     case 1 => Seq(true.B)
@@ -321,7 +372,7 @@ class AMBA_Arbiter[T <: Data](val gen: T, val n: Int) extends Module {
     val fire  = Value(0x1.U) // i "load"  -> 000_0011
   }
   val status = RegInit(sm.idole)
-  val grant = ArbiterCtrl(io.in.map(_.valid))
+  val grant = AMBA_ArbiterCtrl(io.in.map(_.valid))
   val grant_reg = RegInit(VecInit(Seq.fill(n)(false.B)))
 
   io.chosen := (n - 1).asUInt
@@ -365,4 +416,19 @@ class axis_reg_slice(AXIS_DATA_WIDTH: Int, val mname : String) extends BlackBox{
   })
 
   override def desiredName = mname
+}
+
+class sample_max(MaxValue : Int) extends Module{
+  val io = IO(new Bundle() {
+    val enable = Input(Bool())
+    val clear = Input(Bool())
+  })
+
+  val (a, b) = Counter(Range(0, MaxValue), io.enable, io.clear)
+
+  val max = RegInit(0.U(32.W))
+  dontTouch(max)
+  when(a > max){
+    max := a
+  }
 }
