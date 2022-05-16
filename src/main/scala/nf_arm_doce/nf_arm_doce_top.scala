@@ -16,10 +16,8 @@ class axisdata(AXIS_DATA_WIDTH: Int = 8, ELEMENT_WIDTH: Int = 1) extends Bundle 
   }
 }
 
-class axisdata_u(AXIS_DATA_WIDTH: Int = 8, AXIS_USER_WIDTH: Int = 4) extends Bundle {
-  val tdata = UInt((8 * AXIS_DATA_WIDTH).W)
-  val tkeep = UInt(AXIS_DATA_WIDTH.W)
-  val tlast = Bool()
+class axisdata_u(AXIS_DATA_WIDTH: Int = 8, AXIS_USER_WIDTH: Int = 4)
+  extends axisdata(AXIS_DATA_WIDTH, 1) {
   val tuser = UInt(AXIS_USER_WIDTH.W)
 }
 
@@ -107,10 +105,32 @@ class streamdata_id_blackbox(AXIS_DATA_WIDTH: Int = 8, ELEMENT_WIDTH: Int = 1, n
   val tid = Input(UInt((num * AXIS_ID_WIDTH).W))
 }
 
-class streamdata_blackbox(AXIS_DATA_WIDTH: Int = 8, ELEMENT_WIDTH: Int = 1, num : Int = 1) extends Bundle {
+class streamdata_user_blackbox(AXIS_DATA_WIDTH: Int = 8, ELEMENT_WIDTH: Int = 1, num : Int = 1,
+                             AXIS_USER_WIDTH: Int = 5)
+  extends streamdata_blackbox(AXIS_DATA_WIDTH, ELEMENT_WIDTH, num){
+  val tuser = Input(UInt((num * AXIS_USER_WIDTH).W))
+}
+
+class streamdata_blackbox(AXIS_DATA_WIDTH: Int = 8, ELEMENT_WIDTH: Int = 1, num : Int = 1)
+  extends streamdata_bare_blackbox(AXIS_DATA_WIDTH, ELEMENT_WIDTH, num){
+  val tlast = Input(UInt(num.W))
+
+  override def connectfrom(d : (axisdata)) = {
+    tdata := d.tdata
+    tlast := d.tlast
+    tkeep := d.tkeep
+  }
+
+  override def connectto(d : (axisdata), i: Int) = {
+    d.tdata := tdata(AXIS_DATA_WIDTH * 8 * (i + 1) - 1, AXIS_DATA_WIDTH * 8 * i)
+    d.tlast := tlast(i)
+    d.tkeep := tkeep(AXIS_DATA_WIDTH / ELEMENT_WIDTH * (i + 1) - 1, AXIS_DATA_WIDTH / ELEMENT_WIDTH * i)
+  }
+}
+
+class streamdata_bare_blackbox(AXIS_DATA_WIDTH: Int = 8, ELEMENT_WIDTH: Int = 1, num : Int = 1) extends Bundle {
   val tdata = Input(UInt((8 * AXIS_DATA_WIDTH * num).W))
   val tkeep = Input(UInt((num * AXIS_DATA_WIDTH / ELEMENT_WIDTH).W))
-  val tlast = Input(UInt(num.W))
   val tvalid = Input(UInt(num.W))
   val tready = Output(UInt(num.W))
 
@@ -121,13 +141,11 @@ class streamdata_blackbox(AXIS_DATA_WIDTH: Int = 8, ELEMENT_WIDTH: Int = 1, num 
 
   def connectfrom(d : (axisdata)) = {
     tdata := d.tdata
-    tlast := d.tlast
     tkeep := d.tkeep
   }
 
   def connectto(d : (axisdata), i: Int) = {
     d.tdata := tdata(AXIS_DATA_WIDTH * 8 * (i + 1) - 1, AXIS_DATA_WIDTH * 8 * i)
-    d.tlast := tlast(i)
     d.tkeep := tkeep(AXIS_DATA_WIDTH / ELEMENT_WIDTH * (i + 1) - 1, AXIS_DATA_WIDTH / ELEMENT_WIDTH * i)
   }
 
