@@ -156,6 +156,35 @@ class sync_msg (FPGA_Num : Int) extends Bundle() {
   val size = UInt(24.W)
 }
 
+class flow_control(FPGA_Num: Int) extends Module{
+  val io = IO(new Bundle() {
+    val data = Input(UInt(512.W))
+    val keep = Input(UInt(16.W))
+    val pending = Output(UInt(32.W))
+  })
+
+  val hittable = Wire(Vec(16, Vec(16, Bool())))
+  dontTouch(hittable)
+  io.data.asTypeOf(Vec(16, UInt(32.W))).zipWithIndex.map{
+    case(d, x) => {
+      for (i <- 15 to 0 by -1){
+        when(i.U === d(log2Ceil(16) + log2Ceil(FPGA_Num) - 1, log2Ceil(FPGA_Num))){
+          hittable(x)(i) := io.keep(x)
+        }.otherwise{
+          hittable(x)(i) := false.B
+        }
+      }
+    }
+  }
+  val count = VecInit(Seq.tabulate(16)(x => hittable.map(h => h(x).asTypeOf(UInt(5.W))).reduce(_+_)))
+  dontTouch(count)
+  when(count.do_exists(_ >= 2.U)){
+    io.pending := 8.U
+  }.otherwise{
+    io.pending := 4.U
+  }
+}
+
 class Remote_Apply(AXIS_DATA_WIDTH: Int, Local_Scatter_Num: Int, FPGA_Num: Int, Remote_ID : Int) extends Module {
   val io = IO(new Bundle() {
     val xbar_in = Flipped(Decoupled(new axisdata(AXIS_DATA_WIDTH, 4)))
@@ -171,6 +200,7 @@ class Remote_Apply(AXIS_DATA_WIDTH: Int, Local_Scatter_Num: Int, FPGA_Num: Int, 
     val end = Output(Bool())
     val packet_size = Input(UInt(32.W))
     val level = Input(UInt(32.W))
+    val pending_time = Input(UInt(32.W))
   })
 
   val level = RegInit(0.U(32.W))
@@ -251,14 +281,32 @@ class Remote_Apply(AXIS_DATA_WIDTH: Int, Local_Scatter_Num: Int, FPGA_Num: Int, 
   //vertex_in_fifo.io.m_axis.connectto(io.remote_out.bits, 0)
   val send_count = RegInit(0.U(32.W))
   val pending_time = RegInit(0.U(32.W))
+  val extra_time = RegInit(0.U(32.W))
+  val next_pending = RegInit(0.U(32.W))
+  val flow_control_unit = Module(new flow_control(FPGA_Num))
   io.remote_out.bits.tkeep := vertex_in_fifo.io.m_axis.tkeep
   io.remote_out.bits.tdata := vertex_in_fifo.io.m_axis.tdata
   io.remote_out.bits.tuser := Remote_ID.U
   io.remote_out.bits.tlast := send_count === (io.packet_size - 1.U) | vertex_in_fifo.io.axis_rd_data_count === 1.U
+  flow_control_unit.io.data := vertex_in_fifo.io.m_axis.tdata
+  flow_control_unit.io.keep := vertex_in_fifo.io.m_axis.tkeep
+  when(io.remote_out.valid && io.remote_out.ready){
+    when(io.remote_out.bits.tlast){
+      next_pending := 0.U
+    }.otherwise{
+      next_pending := flow_control_unit.io.pending
+    }
+  }
+  when(io.remote_out.valid && io.remote_out.ready && io.remote_out.bits.tlast){
+    extra_time := 0.U
+  }.elsewhen(pending_time === 0.U){
+    extra_time := extra_time + 1.U
+  }
   io.remote_out.valid := false.B
   vertex_in_fifo.io.m_axis.tready := false.B
   when(io.remote_out.valid && io.remote_out.ready && io.remote_out.bits.tlast){
-    pending_time := (io.packet_size << log2Ceil(FPGA_Num)).asUInt() - io.packet_size
+    pending_time := Mux(extra_time > next_pending + flow_control_unit.io.pending - 1.U,
+      0.U, next_pending + flow_control_unit.io.pending - 1.U - extra_time)
   }.elsewhen(pending_time =/= 0.U){
     pending_time := pending_time - 1.U
   }

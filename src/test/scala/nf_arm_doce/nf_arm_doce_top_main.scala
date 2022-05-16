@@ -32,7 +32,7 @@ class BFS_ps(AXI_ADDR_WIDTH : Int = 64, AXI_DATA_WIDTH: Int = 64, AXI_ID_WIDTH: 
       "Rlevel_lo_1" -> 19, "Rlevel_hi_1" -> 20,
       "Rlevel_lo_2" -> 21, "Rlevel_hi_2" -> 22,
       "Rlevel_lo_3" -> 23, "Rlevel_hi_3" -> 24,
-      "packet_size" -> 25)))
+      "packet_size" -> 25, "pending_time" -> 26)))
 
   val MemController = Module(new multi_port_mc(AXI_ADDR_WIDTH, AXI_DATA_WIDTH, AXI_ID_WIDTH + 1,
     AXI_SIZE_WIDTH, 16))
@@ -140,6 +140,7 @@ class BFS_ps(AXI_ADDR_WIDTH : Int = 64, AXI_DATA_WIDTH: Int = 64, AXI_ID_WIDTH: 
       r.io.recv_sync_phase2 := ReScatter.io.issue_sync_phase2(i)
       r.io.packet_size := controls.GetRegByName("packet_size")
       r.io.level := controls.io.level
+      r.io.pending_time := controls.GetRegByName("pending_time")
     }
   }
   Applys.map{x => x.io.local_fpga_id := controls.GetRegByName("fpga_id")}
