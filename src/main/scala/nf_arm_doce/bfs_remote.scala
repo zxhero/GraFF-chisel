@@ -179,9 +179,9 @@ class flow_control(FPGA_Num: Int) extends Module{
   val count = VecInit(Seq.tabulate(16)(x => hittable.map(h => h(x).asTypeOf(UInt(5.W))).reduce(_+_)))
   dontTouch(count)
   when(count.do_exists(_ >= 2.U)){
-    io.pending := 8.U
+    io.pending := (2*FPGA_Num).U
   }.otherwise{
-    io.pending := 4.U
+    io.pending := FPGA_Num.U
   }
 }
 
