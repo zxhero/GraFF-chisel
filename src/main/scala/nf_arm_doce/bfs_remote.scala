@@ -178,7 +178,9 @@ class flow_control(FPGA_Num: Int) extends Module{
   }
   val count = VecInit(Seq.tabulate(16)(x => hittable.map(h => h(x).asTypeOf(UInt(5.W))).reduce(_+_)))
   dontTouch(count)
-  when(count.do_exists(_ >= 2.U)){
+  when(count.do_exists(_ >= 3.U)){
+    io.pending := (3*FPGA_Num).U
+  }.elsewhen(count.do_exists(_ === 2.U)){
     io.pending := (2*FPGA_Num).U
   }.otherwise{
     io.pending := FPGA_Num.U
@@ -227,6 +229,16 @@ class Remote_Apply(AXIS_DATA_WIDTH: Int, Local_Scatter_Num: Int, FPGA_Num: Int, 
   io.xbar_in.ready := collector.io.in.ready
 
   val vertex_in_fifo = Module(new axis_data_count_fifo(AXIS_DATA_WIDTH, "remote_apply_vid_fifo"))
+  val vertex_in_fifo_data_count = RegInit(0.U(32.W))
+  when(vertex_in_fifo.io.s_axis.tvalid.asBool() && vertex_in_fifo.io.s_axis.tready.asBool()
+  && vertex_in_fifo.io.m_axis.tvalid.asBool() && vertex_in_fifo.io.m_axis.tready.asBool()) {
+    vertex_in_fifo_data_count := vertex_in_fifo_data_count
+  }.elsewhen(vertex_in_fifo.io.s_axis.tvalid.asBool() && vertex_in_fifo.io.s_axis.tready.asBool()){
+    vertex_in_fifo_data_count := vertex_in_fifo_data_count + 1.U
+  }.elsewhen(vertex_in_fifo.io.m_axis.tvalid.asBool() && vertex_in_fifo.io.m_axis.tready.asBool()){
+    vertex_in_fifo_data_count := vertex_in_fifo_data_count - 1.U
+  }
+
   object sm extends ChiselEnum {
     val idole = Value(0x0.U)
     val output_fin_phase1 = Value(0x1.U)
@@ -287,7 +299,7 @@ class Remote_Apply(AXIS_DATA_WIDTH: Int, Local_Scatter_Num: Int, FPGA_Num: Int, 
   io.remote_out.bits.tkeep := vertex_in_fifo.io.m_axis.tkeep
   io.remote_out.bits.tdata := vertex_in_fifo.io.m_axis.tdata
   io.remote_out.bits.tuser := Remote_ID.U
-  io.remote_out.bits.tlast := send_count === (io.packet_size - 1.U) | vertex_in_fifo.io.axis_rd_data_count === 1.U
+  io.remote_out.bits.tlast := send_count === (io.packet_size - 1.U) | vertex_in_fifo_data_count === 1.U
   flow_control_unit.io.data := vertex_in_fifo.io.m_axis.tdata
   flow_control_unit.io.keep := vertex_in_fifo.io.m_axis.tkeep
   when(io.remote_out.valid && io.remote_out.ready){
@@ -317,7 +329,7 @@ class Remote_Apply(AXIS_DATA_WIDTH: Int, Local_Scatter_Num: Int, FPGA_Num: Int, 
       send_count := send_count + 1.U
     }
   }
-  when(vertex_in_fifo.io.axis_rd_data_count >= io.packet_size && send_count === 0.U
+  when(vertex_in_fifo_data_count >= io.packet_size && send_count === 0.U
   || (send_count =/= 0.U)
   || (sync_status =/= sm.idole)){
     when(pending_time === 0.U){
