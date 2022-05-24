@@ -163,28 +163,7 @@ class flow_control(FPGA_Num: Int) extends Module{
     val pending = Output(UInt(32.W))
   })
 
-  val hittable = Wire(Vec(16, Vec(16, Bool())))
-  dontTouch(hittable)
-  io.data.asTypeOf(Vec(16, UInt(32.W))).zipWithIndex.map{
-    case(d, x) => {
-      for (i <- 15 to 0 by -1){
-        when(i.U === d(log2Ceil(16) + log2Ceil(FPGA_Num) - 1, log2Ceil(FPGA_Num))){
-          hittable(x)(i) := io.keep(x)
-        }.otherwise{
-          hittable(x)(i) := false.B
-        }
-      }
-    }
-  }
-  val count = VecInit(Seq.tabulate(16)(x => hittable.map(h => h(x).asTypeOf(UInt(5.W))).reduce(_+_)))
-  dontTouch(count)
-  when(count.do_exists(_ >= 3.U)){
-    io.pending := (3*FPGA_Num).U
-  }.elsewhen(count.do_exists(_ === 2.U)){
-    io.pending := (2*FPGA_Num).U
-  }.otherwise{
-    io.pending := FPGA_Num.U
-  }
+  io.pending := FPGA_Num.U
 }
 
 class Remote_Apply(AXIS_DATA_WIDTH: Int, Local_Scatter_Num: Int, FPGA_Num: Int, Remote_ID : Int) extends Module {
