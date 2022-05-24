@@ -2,7 +2,7 @@ package remote
 
 import chisel3._
 import chisel3.experimental.ChiselEnum
-import chisel3.util.{Arbiter, Cat, Decoupled, Mux1H, MuxCase, log2Ceil}
+import chisel3.util.{Arbiter, Cat, Counter, Decoupled, Mux1H, MuxCase, log2Ceil}
 import nf_arm_doce._
 import utils._
 
@@ -160,6 +160,8 @@ class flow_control(FPGA_Num: Int) extends Module{
   val io = IO(new Bundle() {
     val data = Input(UInt(512.W))
     val keep = Input(UInt(16.W))
+    val handshake = Input(Bool())
+    val period = Input(UInt(32.W)) // less than 32
     val pending = Output(UInt(32.W))
   })
 
@@ -176,12 +178,36 @@ class flow_control(FPGA_Num: Int) extends Module{
       }
     }
   }
+  val timing = RegInit(0.U(32.W))
+  when(io.handshake){
+    when(timing === io.period){
+      timing := 1.U
+    }.otherwise{
+      timing := timing + 1.U
+    }
+  }
   val count = VecInit(Seq.tabulate(16)(x => hittable.map(h => h(x).asTypeOf(UInt(5.W))).reduce(_+_)))
   dontTouch(count)
-  when(count.do_exists(_ >= 3.U)){
-    io.pending := (3*FPGA_Num).U
-  }.elsewhen(count.do_exists(_ === 2.U)){
-    io.pending := (2*FPGA_Num).U
+  val count_reg = RegInit(VecInit(Seq.fill(16)(0.U(16.W))))
+  count_reg.zip(count).map{
+    case(cr, c) => {
+      when(io.handshake){
+        when(timing === io.period){
+          cr := c
+        }.otherwise{
+          cr := cr + c
+        }
+      }
+    }
+  }
+
+  when(timing === io.period){
+    io.pending := FPGA_Num.U
+    for(i <- 1 to 31 by 1){
+      when(count_reg.do_exists(_ >= io.period + i.U)){
+        io.pending := (i*FPGA_Num + FPGA_Num).U
+      }
+    }
   }.otherwise{
     io.pending := FPGA_Num.U
   }
@@ -302,6 +328,8 @@ class Remote_Apply(AXIS_DATA_WIDTH: Int, Local_Scatter_Num: Int, FPGA_Num: Int, 
   io.remote_out.bits.tlast := send_count === (io.packet_size - 1.U) | vertex_in_fifo_data_count === 1.U
   flow_control_unit.io.data := vertex_in_fifo.io.m_axis.tdata
   flow_control_unit.io.keep := vertex_in_fifo.io.m_axis.tkeep
+  flow_control_unit.io.handshake := io.remote_out.valid && io.remote_out.ready
+  flow_control_unit.io.period := io.pending_time
   when(io.remote_out.valid && io.remote_out.ready){
     when(io.remote_out.bits.tlast){
       next_pending := 0.U
