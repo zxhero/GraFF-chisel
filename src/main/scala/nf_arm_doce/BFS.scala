@@ -7,7 +7,8 @@ import chisel3.util._
 import utils._
 
 //TODO: rename to cache
-class WB_engine(AXI_ADDR_WIDTH : Int = 64, AXI_DATA_WIDTH: Int = 64, AXI_ID_WIDTH: Int = 6, AXI_SIZE_WIDTH: Int = 3) extends Module{
+class WB_engine(AXI_ADDR_WIDTH : Int = 64, AXI_DATA_WIDTH: Int = 64, AXI_ID_WIDTH: Int = 6, AXI_SIZE_WIDTH: Int = 3,
+                FPGA_Num: Int) extends Module{
   val io = IO(new Bundle() {
     val ddr_aw = Decoupled(new axiaw(AXI_ADDR_WIDTH, AXI_ID_WIDTH, AXI_SIZE_WIDTH, 1))
     val ddr_w = Decoupled(new axiw(AXI_DATA_WIDTH, 1))
@@ -31,10 +32,14 @@ class WB_engine(AXI_ADDR_WIDTH : Int = 64, AXI_DATA_WIDTH: Int = 64, AXI_ID_WIDT
     Mux(counter === 63.U, 0.U, counter + 1.U)
   }
 
+  def vid2addr(vid: UInt) : UInt = {
+    (vid(30, log2Ceil(FPGA_Num)) << 2.U).asTypeOf(UInt(AXI_ADDR_WIDTH.W))
+  }
+
   //read region counter
   val vid = io.xbar_in.bits.tdata
   val level = io.level
-  val dramaddr = (vid << 2.U).asTypeOf(UInt(AXI_ADDR_WIDTH.W))
+  val dramaddr = vid2addr(vid)
   val block_index = dramaddr(25, 14)
 
   region_counter.io.clkb := clock.asBool()
@@ -209,7 +214,8 @@ class WB_engine(AXI_ADDR_WIDTH : Int = 64, AXI_DATA_WIDTH: Int = 64, AXI_ID_WIDT
   io.end := wb_sm === sm.wb_1block && wb_block_index === (4 * 1024 - 1).U
 }
 
-class Apply(AXI_ADDR_WIDTH : Int = 64, AXI_DATA_WIDTH: Int = 64, AXI_ID_WIDTH: Int = 6, AXI_SIZE_WIDTH: Int = 3) extends Module{
+class Apply(AXI_ADDR_WIDTH : Int = 64, AXI_DATA_WIDTH: Int = 64, AXI_ID_WIDTH: Int = 6, AXI_SIZE_WIDTH: Int = 3,
+            FPGA_Num: Int) extends Module{
   val io = IO(new Bundle(){
     val ddr_aw = Decoupled(new axiaw(AXI_ADDR_WIDTH, AXI_ID_WIDTH, AXI_SIZE_WIDTH, 1))
     val ddr_w = Decoupled(new axiw(AXI_DATA_WIDTH, 1))
@@ -235,7 +241,7 @@ class Apply(AXI_ADDR_WIDTH : Int = 64, AXI_DATA_WIDTH: Int = 64, AXI_ID_WIDTH: I
 
   io.gather_in.ready := vertex_update_buffer.io.full === false.B
 
-  val update_engine = Module(new WB_engine(AXI_ADDR_WIDTH, AXI_DATA_WIDTH, AXI_ID_WIDTH, AXI_DATA_WIDTH))
+  val update_engine = Module(new WB_engine(AXI_ADDR_WIDTH, AXI_DATA_WIDTH, AXI_ID_WIDTH, AXI_DATA_WIDTH, FPGA_Num))
   update_engine.io.xbar_in.bits.tdata := vertex_update_buffer.io.dout(63, 32)
   update_engine.io.xbar_in.valid := vertex_update_buffer.is_valid()
   update_engine.io.level_base_addr := io.level_base_addr
@@ -514,7 +520,7 @@ class Broadcast(AXI_ADDR_WIDTH : Int = 64, AXI_DATA_WIDTH: Int, AXI_ID_WIDTH: In
   assert(AXI_ID_WIDTH > log2Ceil(32))
 
   def vid2addr(vid: UInt) : UInt = {
-    io.embedding_base_addr + (vid << log2Ceil(4 * EMBEDDING + 8))
+    io.embedding_base_addr + (vid(30, log2Ceil(FPGA_Num)) << log2Ceil(4 * EMBEDDING + 8))
   }
 
   //upward
