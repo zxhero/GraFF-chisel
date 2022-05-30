@@ -32,7 +32,7 @@ class BFS_ps(AXI_ADDR_WIDTH : Int = 64, AXI_DATA_WIDTH: Int = 64, AXI_ID_WIDTH: 
 
   val MemController = Module(new multi_port_mc(AXI_ADDR_WIDTH, AXI_DATA_WIDTH, AXI_ID_WIDTH + 1, AXI_SIZE_WIDTH, 16))
   val Applys = Seq.tabulate(16)(
-    i => Module(new Scatter(4, i, 128, 1, 16))
+    i => Module(new Scatter(4, i, 64, 1, 16))
   )
   val Gathers = Module(new Gather(64, 4))
   val LevelCache = Module(new Apply(AXI_ADDR_WIDTH, AXI_DATA_WIDTH, AXI_ID_WIDTH + 1, AXI_SIZE_WIDTH))
