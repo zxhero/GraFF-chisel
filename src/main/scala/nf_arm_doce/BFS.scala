@@ -577,6 +577,10 @@ class Broadcast(AXI_ADDR_WIDTH : Int = 64, AXI_DATA_WIDTH: Int, AXI_ID_WIDTH: In
   vertex_read_buffer.io.rd_en := (arbi.io.in(1).ready && inflight_vtxs < 32.U) | upward_status === upward_sm.output_fin
   arbi.io.in(0) <> edge_cache.io.out
 
+  val (ar_ready_counter, ar_b_1) = Counter(io.ddr_ar.ready === true.B && io.ddr_ar.valid === false.B,
+    0x10000000)
+  dontTouch(ar_ready_counter)
+
   //front end of down ward
   val num_regfile = Module(new regFile(32, 32))
   num_regfile.io.writeFlag := arbi.io.in(0).ready & arbi.io.in(0).valid
@@ -665,6 +669,9 @@ class Broadcast(AXI_ADDR_WIDTH : Int = 64, AXI_DATA_WIDTH: Int, AXI_ID_WIDTH: In
   ))
   vertex_out_fifo.io.s_axis.tlast := true.B
   r_demux_out(0).ready := vertex_out_fifo.io.s_axis.tready
+
+  val (edge_fifo_ready_counter, b_1) = Counter(vertex_out_fifo.io.s_axis.tready === 0.U, 0x10000000)
+  dontTouch(edge_fifo_ready_counter)
 
   //control path
   val syncRecv = RegInit(VecInit(Seq.fill(Broadcast_Num)(false.B)))
@@ -844,43 +851,45 @@ class Scatter(AXIS_DATA_WIDTH: Int = 4, SID: Int, AXI_DATA_WIDTH: Int,
   //read or write bitmap ehnr this is not FIN
   val bitmap_arvalid = arbi.io.ddr_out.valid
   val halt = vertex_out_fifo.io.s_axis.tready === false.B
-  val bitmap_wait = Module(new pipeline(UInt(32.W)))
-  bitmap_wait.io.din.valid := bitmap_arvalid
-  bitmap_wait.io.din.bits := arbi.io.ddr_out.bits.tdata
-  bitmap_wait.io.dout.ready := !halt
+  val bitmap_wait = RegInit(0.U.asTypeOf(ValidIO(UInt(32.W))))
+  when(!halt){
+    bitmap_wait.valid := bitmap_arvalid
+    bitmap_wait.bits := arbi.io.ddr_out.bits.tdata
+  }
   val bitmap_doutb = Wire(UInt(9.W))
-  val bitmap_write_addr = Module(new pipeline(UInt(32.W)))
-  bitmap_write_addr.io.din.valid := bitmap_wait.io.dout.valid &&
-    (bitmap_doutb(vid2bitmap_offset(bitmap_wait.io.dout.bits)) =/= 1.U(1.W) | bitmap_wait.io.dout.bits(31) === 1.U(1.W))
-  bitmap_write_addr.io.din.bits := bitmap_wait.io.dout.bits
-  bitmap_write_addr.io.dout.ready := !halt
-  val bitmap_write_data = Module(new pipeline(UInt(9.W)))
-  bitmap_write_data.io.din.valid := (bitmap_wait.io.dout.valid &&
-    (bitmap_doutb(vid2bitmap_offset(bitmap_wait.io.dout.bits)) =/= 1.U(1.W) | bitmap_wait.io.dout.bits(31) === 1.U(1.W)))
-  bitmap_write_data.io.din.bits := bitmap_doutb | (1.U(9.W) << vid2bitmap_offset(bitmap_wait.io.dout.bits)).asUInt()
-  bitmap_write_data.io.dout.ready := !halt
-  val bitmap_write_data_forward = Module(new pipeline(UInt(9.W)))
-  bitmap_write_data_forward.io.din.valid := bitmap_write_addr.io.dout.valid && bitmap_arvalid &&
-    (vid2bitmap_addr(arbi.io.ddr_out.bits.tdata) === vid2bitmap_addr(bitmap_write_addr.io.dout.bits))
-  bitmap_write_data_forward.io.din.bits := bitmap_write_data.io.dout.bits
-  bitmap_write_data_forward.io.dout.ready := !halt
+  val bitmap_write_addr = RegInit(0.U.asTypeOf(ValidIO(UInt(32.W))))
+  when(!halt) {
+    bitmap_write_addr.valid := bitmap_wait.valid &&
+      (bitmap_doutb(vid2bitmap_offset(bitmap_wait.bits)) =/= 1.U(1.W) | bitmap_wait.bits(31) === 1.U(1.W))
+    bitmap_write_addr.bits := bitmap_wait.bits
+  }
+  val bitmap_write_data = RegInit(0.U.asTypeOf(ValidIO(UInt(9.W))))
+  when(!halt){
+    bitmap_write_data.valid := bitmap_wait.valid &&
+      (bitmap_doutb(vid2bitmap_offset(bitmap_wait.bits)) =/= 1.U(1.W) | bitmap_wait.bits(31) === 1.U(1.W))
+    bitmap_write_data.bits := bitmap_doutb | (1.U(9.W) << vid2bitmap_offset(bitmap_wait.bits)).asUInt()
+  }
+  val bitmap_write_data_forward = RegInit(0.U.asTypeOf(ValidIO(UInt(9.W))))
+  bitmap_write_data_forward.valid := bitmap_write_addr.valid && bitmap_arvalid &&
+    (vid2bitmap_addr(arbi.io.ddr_out.bits.tdata) === vid2bitmap_addr(bitmap_write_addr.bits))
+  bitmap_write_data_forward.bits := bitmap_write_data.bits
   bitmap_doutb := MuxCase(bitmap.io.doutb, Array(
-    (bitmap_write_addr.io.dout.valid && bitmap_wait.io.dout.valid &&
-      vid2bitmap_addr(bitmap_wait.io.dout.bits) === vid2bitmap_addr(bitmap_write_addr.io.dout.bits)) -> bitmap_write_data.io.dout.bits,
-    bitmap_write_data_forward.io.dout.valid -> bitmap_write_data_forward.io.dout.bits
+    (bitmap_write_addr.valid && bitmap_wait.valid &&
+      vid2bitmap_addr(bitmap_wait.bits) === vid2bitmap_addr(bitmap_write_addr.bits)) -> bitmap_write_data.bits,
+    bitmap_write_data_forward.valid -> bitmap_write_data_forward.bits
   ))
 
   arbi.io.ddr_out.ready := !halt
   bitmap.io.enb :=  true.B//bitmap_arvalid
-  bitmap.io.addrb := vid2bitmap_addr(arbi.io.ddr_out.bits.tdata)
+  bitmap.io.addrb := Mux(halt, vid2bitmap_addr(bitmap_wait.bits) ,vid2bitmap_addr(arbi.io.ddr_out.bits.tdata))
   bitmap.io.clkb := clock.asBool()
-  vertex_out_fifo.io.s_axis.tvalid := bitmap_write_addr.io.dout.valid
-  vertex_out_fifo.io.s_axis.tdata := bitmap_write_addr.io.dout.bits
+  vertex_out_fifo.io.s_axis.tvalid := bitmap_write_addr.valid
+  vertex_out_fifo.io.s_axis.tdata := bitmap_write_addr.bits
   bitmap.io.ena := true.B
-  bitmap.io.wea := bitmap_write_addr.io.dout.valid & bitmap_write_addr.io.dout.bits(31) === 0.U(1.W)
+  bitmap.io.wea := bitmap_write_addr.valid & bitmap_write_addr.bits(31) === 0.U(1.W)
   bitmap.io.clka := clock.asBool()
-  bitmap.io.dina := bitmap_write_data.io.dout.bits
-  bitmap.io.addra := vid2bitmap_addr(bitmap_write_addr.io.dout.bits)
+  bitmap.io.dina := bitmap_write_data.bits
+  bitmap.io.addra := vid2bitmap_addr(bitmap_write_addr.bits)
   vertex_out_fifo.io.m_axis.tready := io.ddr_out.ready //| vertex_out_fifo.test_FIN()
   io.ddr_out.valid := vertex_out_fifo.io.m_axis.tvalid & vertex_out_fifo.io.m_axis.tdata(31) === 0.U
   io.ddr_out.bits.tkeep := true.B
@@ -985,7 +994,7 @@ class multi_channel_fifo(AXI_DATA_WIDTH: Int = 64, size : Int, val Scatter_num :
     i => i.io.data_count.asTypeOf(UInt((log2Ceil(size * AXI_DATA_WIDTH / 4) + 1).W))
   }.reduce(_+_)
   io.out.almost_full := collector_fifos.map{
-    i => (i.io.data_count > 16.U)
+    i => (i.io.data_count > (size / 2).U)
   }.reduce(_&_)
 
   val ready_counter = RegInit(0.U(32.W))
@@ -1095,7 +1104,8 @@ class multi_port_mc(AXI_ADDR_WIDTH : Int = 64, AXI_DATA_WIDTH: Int = 64, AXI_ID_
   }
   tier_fifo.zipWithIndex.map{
     case(f, i) => {
-      f.io.out.rd_en := Mux(next_tier_mask(i), axi.w.ready, io.cacheable_out.ready)
+      f.io.out.rd_en := Mux(next_tier_mask(i), axi.w.valid.asBool() && axi.w.ready.asBool(), io.cacheable_out.ready
+       && io.cacheable_out.valid)
       f.io.out.wr_en := Mux(next_tier_mask(i), 0.U, axi.r.valid)
       f.io.out.din := Mux(next_tier_mask(i), 0.U, axi.r.bits.rdata)
       f.io.flush := io.signal && (status === sm.signal_wait_0 || status === sm.signal_wait_1)
@@ -1110,7 +1120,8 @@ class multi_port_mc(AXI_ADDR_WIDTH : Int = 64, AXI_DATA_WIDTH: Int = 64, AXI_ID_
   }
   tier_status.zipWithIndex.map{
     case (s, i) => {
-      when(next_tier_mask(i) && tier_fifo(i).io.out.almost_full && s === sm.idole){
+      when(next_tier_mask(i) && tier_fifo(i).io.out.almost_full && s === sm.idole
+      && status =/= sm.wait_tier0_wb && status =/= sm.wait_tier1_wb){
         s := sm.writeback
       }.elsewhen(!next_tier_mask(i) && tier_fifo(i).is_empty() && tier_counter(i) =/= 0.U && s === sm.idole){
         s := sm.readback
