@@ -35,7 +35,7 @@ class BFS_ps(AXI_ADDR_WIDTH : Int = 64, AXI_DATA_WIDTH: Int = 64, AXI_ID_WIDTH: 
     i => Module(new Scatter(4, i, 64, 1, 16))
   )
   val Gathers = Module(new Gather(64, 4))
-  val LevelCache = Module(new Apply(AXI_ADDR_WIDTH, AXI_DATA_WIDTH, AXI_ID_WIDTH + 1, AXI_SIZE_WIDTH))
+  val LevelCache = Module(new Apply(AXI_ADDR_WIDTH, AXI_DATA_WIDTH, AXI_ID_WIDTH + 1, AXI_SIZE_WIDTH, 0))
   val Scatters = Seq.tabulate(4)(
     i => Module(new Broadcast(64, 16, 6, 3,
       14, 4, i, 1))
