@@ -432,3 +432,75 @@ class sample_max(MaxValue : Int) extends Module{
     max := a
   }
 }
+
+class axis_arbitrator(AXIS_DATA_WIDTH: Int = 4, NUM : Int, ELEMENT_WIDTH: Int = 4) extends Module{
+  val io = IO(new Bundle() {
+    val xbar_in = Flipped(Decoupled(new axisdata(AXIS_DATA_WIDTH * NUM, ELEMENT_WIDTH)))
+    val ddr_out = Decoupled(new axisdata(AXIS_DATA_WIDTH, ELEMENT_WIDTH))
+  })
+  assert(AXIS_DATA_WIDTH == ELEMENT_WIDTH)
+  assert(NUM + log2Ceil(NUM) + 1 < AXIS_DATA_WIDTH * NUM)
+  val in = Module(new axis_reg_slice(AXIS_DATA_WIDTH * NUM,
+    "axis_arbitrator_in_reg_slice_"+(AXIS_DATA_WIDTH * NUM).toString))
+  in.io.aclk := clock.asBool()
+  in.io.aresetn := ~reset.asBool()
+  in.io.s_axis.connectfrom(io.xbar_in.bits)
+  in.io.s_axis.tvalid := io.xbar_in.valid
+  io.xbar_in.ready := in.io.s_axis.tready
+
+  val in_keep = VecInit(in.io.m_axis.tkeep(AXIS_DATA_WIDTH / ELEMENT_WIDTH * NUM - 1, 0).asBools())
+  val in_count = in_keep.map(x=>x.asTypeOf(UInt((log2Ceil(NUM) + 1).W))).reduce(_+_)
+  val mid = Module(new axis_reg_slice(AXIS_DATA_WIDTH * NUM,
+    "axis_arbitrator_in_reg_slice_"+(AXIS_DATA_WIDTH * NUM).toString))
+  mid.io.aclk := clock.asBool()
+  mid.io.aresetn := ~reset.asBool()
+  mid.io.s_axis.tvalid := in.io.m_axis.tvalid
+  mid.io.s_axis.tdata := in.io.m_axis.tdata
+  mid.io.s_axis.tlast := in.io.m_axis.tlast
+  mid.io.s_axis.tkeep := Cat(in_count, in.io.m_axis.tkeep(AXIS_DATA_WIDTH * NUM - log2Ceil(NUM) - 2, 0))
+  in.io.m_axis.tready := mid.io.s_axis.tready
+
+  val data = mid.io.m_axis.tdata
+  val keep = VecInit(mid.io.m_axis.tkeep(AXIS_DATA_WIDTH / ELEMENT_WIDTH * NUM - 1, 0).asBools())
+  val index = RegInit(VecInit(Seq.fill(AXIS_DATA_WIDTH / ELEMENT_WIDTH * NUM)(false.B)))
+  val ungrant_keep = keep.zip(index).map{
+    case (a, b) => a && !b
+  }
+  val grant = VecInit(AMBA_ArbiterCtrl(ungrant_keep))
+  val choosen_keep = grant.zip(ungrant_keep).map{
+    case (a, b) => a && b
+  }
+  val out = Module(new axis_reg_slice(AXIS_DATA_WIDTH, "axis_arbitrator_out_reg_slice_"+AXIS_DATA_WIDTH.toString))
+  out.io.aclk := clock.asBool()
+  out.io.aresetn := ~reset.asBool()
+
+  index.zip(choosen_keep).map{
+    case (a, b) => {
+      when(mid.io.m_axis.tready.asBool() && mid.io.m_axis.tvalid.asBool()){
+        a := false.B
+      }.elsewhen(out.io.s_axis.tvalid.asBool() && out.io.s_axis.tready.asBool()){
+        a := a | b
+      }
+    }
+  }
+
+  val count = RegInit(0.U((log2Ceil(NUM) + 1).W))
+  val next_count = mid.io.m_axis.tkeep(AXIS_DATA_WIDTH * NUM - 1, AXIS_DATA_WIDTH * NUM - log2Ceil(NUM) - 1)
+  when(out.io.s_axis.tvalid.asBool() && out.io.s_axis.tready.asBool()){
+    when(count === 0.U){
+      count := next_count - 1.U
+    }.otherwise{
+      count := count - 1.U
+    }
+  }
+  mid.io.m_axis.tready := out.io.s_axis.tready.asBool() && (count === 1.U || next_count === 1.U)
+
+  out.io.s_axis.tvalid := choosen_keep.reduce(_|_) && mid.io.m_axis.tvalid.asBool()
+  out.io.s_axis.tkeep := 1.U
+  out.io.s_axis.tlast := true.B
+  out.io.s_axis.tdata :=
+    Mux1H(Seq.tabulate(NUM)(x => (choosen_keep(x) -> data((x + 1) * AXIS_DATA_WIDTH * 8 - 1, x * AXIS_DATA_WIDTH * 8))))
+  out.io.m_axis.connectto(io.ddr_out.bits, 0)
+  io.ddr_out.valid := out.io.m_axis.tvalid
+  out.io.m_axis.tready := io.ddr_out.ready
+}

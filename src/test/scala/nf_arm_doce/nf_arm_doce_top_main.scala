@@ -35,7 +35,7 @@ class BFS_ps(AXI_ADDR_WIDTH : Int = 64, AXI_DATA_WIDTH: Int = 64, AXI_ID_WIDTH: 
     i => Module(new Scatter(4, i, 64, 1, 16))
   )
   val Gathers = Module(new Gather(64, 4))
-  val LevelCache = Module(new Apply(AXI_ADDR_WIDTH, AXI_DATA_WIDTH, AXI_ID_WIDTH + 1, AXI_SIZE_WIDTH, 0))
+  val LevelCache = Module(new Apply(AXI_ADDR_WIDTH, AXI_DATA_WIDTH, AXI_ID_WIDTH + 1, AXI_SIZE_WIDTH, 1))
   val Scatters = Seq.tabulate(4)(
     i => Module(new Broadcast(64, 16, 6, 3,
       14, 4, i, 1))
@@ -44,7 +44,7 @@ class BFS_ps(AXI_ADDR_WIDTH : Int = 64, AXI_DATA_WIDTH: Int = 64, AXI_ID_WIDTH: 
 
   io.PLmemory <> MemController.io.ddr_out
   Gathers.io.ddr_in <> MemController.io.cacheable_out
-  LevelCache.io.gather_in <> Gathers.io.gather_out(4)
+  LevelCache.io.gather_in <> Gathers.io.level_cache_out
   LevelCache.io.ddr_w <> MemController.io.non_cacheable_in.w
   LevelCache.io.ddr_aw <> MemController.io.non_cacheable_in.aw
   LevelCache.io.ddr_b <> MemController.io.non_cacheable_in.b
