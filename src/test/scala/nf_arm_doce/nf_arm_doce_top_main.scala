@@ -56,7 +56,7 @@ class BFS_ps(AXI_ADDR_WIDTH : Int = 64, AXI_DATA_WIDTH: Int = 64, AXI_ID_WIDTH: 
 
   io.PLmemory <> MemController.io.ddr_out
   Gathers.io.ddr_in <> MemController.io.cacheable_out
-  LevelCache.io.gather_in <> Gathers.io.gather_out(4)
+  LevelCache.io.gather_in <> Gathers.io.level_cache_out
   LevelCache.io.ddr_w <> MemController.io.non_cacheable_in.w
   LevelCache.io.ddr_aw <> MemController.io.non_cacheable_in.aw
   LevelCache.io.ddr_b <> MemController.io.non_cacheable_in.b
@@ -140,7 +140,8 @@ class BFS_ps(AXI_ADDR_WIDTH : Int = 64, AXI_DATA_WIDTH: Int = 64, AXI_ID_WIDTH: 
       r.io.recv_sync_phase2 := ReScatter.io.issue_sync_phase2(i)
       r.io.packet_size := controls.GetRegByName("packet_size")
       r.io.level := controls.io.level
-      r.io.pending_time := controls.GetRegByName("pending_time")
+      r.io.pending_time := controls.GetRegByName("pending_time")(15, 0)
+      r.io.pending_parameter := controls.GetRegByName("pending_time")(31, 16)
     }
   }
   Applys.map{x => x.io.local_fpga_id := controls.GetRegByName("fpga_id")}
