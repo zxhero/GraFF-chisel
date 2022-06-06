@@ -380,12 +380,17 @@ class readEdge_engine(AXI_ADDR_WIDTH : Int = 64, AXI_DATA_WIDTH: Int, AXI_ID_WID
   val io = IO(new Bundle() {
     val in = Flipped(Decoupled(new axir(AXI_DATA_WIDTH, AXI_ID_WIDTH)))
     val out = Decoupled(new axiar(AXI_ADDR_WIDTH, AXI_ID_WIDTH, AXI_SIZE_WIDTH, 1))
+    val xbar_out = Decoupled(new axisdata(AXI_DATA_WIDTH, 4))
     //control signal
     val edge_base_addr = Input(UInt(64.W))
-    val free_ptr = Input(UInt((AXI_ID_WIDTH-1).W))
-    val read_edge_num = Output(UInt(32.W))
+    //val free_ptr = Input(UInt((AXI_ID_WIDTH-1).W))
+    //val read_edge_num = Output(UInt(32.W))
     val read_edge_fifo_empty = Output(Bool())
-    val inflight_vtxs = Input(UInt(64.W))
+    val credit = Output(UInt(8.W))
+    val credit_dec = Input(Bool())
+    val traveled_edges = Output(UInt(64.W))
+    val signal = Input(Bool())
+    //val inflight_vtxs = Input(UInt(64.W))
   })
 
   def get_edge_array_index(mdata : UInt) : UInt = {
@@ -404,69 +409,297 @@ class readEdge_engine(AXI_ADDR_WIDTH : Int = 64, AXI_DATA_WIDTH: Int, AXI_ID_WID
     id(AXI_ID_WIDTH - 1 - 1, 0)
   }
 
-  //read edge array
-  val edge_read_buffer = Module(new BRAM_fifo(32, 64, "meta_fifo"))
-  val transaction_start = RegInit(false.B)
-  when(io.in.valid && io.in.ready && !io.in.bits.rlast.asBool()) {
-    transaction_start := true.B
-  }.elsewhen(io.in.valid && io.in.ready && io.in.bits.rlast.asBool()){
-    transaction_start := false.B
+  class request extends Bundle() {
+    val count = UInt(32.W)
+    val is_new = Bool()
+    val index = UInt(32.W)
+    val reg_ptr = UInt(6.W)
   }
-  edge_read_buffer.io.clk := clock.asBool()
-  edge_read_buffer.io.srst := reset.asBool()
-  edge_read_buffer.io.din := io.in.bits.rdata(63, 0)
-  edge_read_buffer.io.wr_en := !get_flag(io.in.bits.rid) & io.in.valid &
-    (get_edge_count(io.in.bits.rdata) > EMBEDDING.asUInt()) & (transaction_start === false.B)
-  io.in.ready := edge_read_buffer.io.full === false.B
 
-  val remainning_edges = (get_edge_count(edge_read_buffer.io.dout) - EMBEDDING.asUInt())
-  object cache_sm extends ChiselEnum {
-    val idole = Value(0x0.U)
-    val next_page  = Value(0x1.U) // i "load"  -> 000_0011
+  //tag return data
+  val KEEP_WIDTH = AXI_DATA_WIDTH / 4
+  object sm extends ChiselEnum {
+    //val idole = Value(0x0.U)
+    val firstBurst  = Value(0x0.U) // i "load"  -> 000_0011
+    val remainingBurst_embedding   = Value(0x1.U) // i "imm"   -> 001_0011
+    val remainingBurst_edge   = Value(0x2.U)
   }
-  val cache_status = RegInit(cache_sm.idole)
-  val counter = RegInit(0.U(32.W))
-  val next_counter = Wire(UInt(32.W))
-  val araddr = RegInit(0.U(AXI_ADDR_WIDTH.W))
-  val max_vertex_read_per_transaction = 64.U
-  next_counter := counter - max_vertex_read_per_transaction
-  when(remainning_edges.asUInt() > max_vertex_read_per_transaction && io.out.ready && io.out.valid && cache_status === cache_sm.idole){
-    cache_status := cache_sm.next_page
-    counter := remainning_edges - max_vertex_read_per_transaction
-    araddr := io.edge_base_addr + (get_edge_array_index(edge_read_buffer.io.dout) << 2).asUInt() + (max_vertex_read_per_transaction << 2).asUInt()
-  }.elsewhen(io.out.ready && io.out.valid && cache_status === cache_sm.next_page){
-    when(counter <= max_vertex_read_per_transaction){
-      cache_status := cache_sm.idole
-      counter := 0.U
-      araddr := 0.U
+  val status = RegInit(sm.firstBurst)
+  val num = RegInit(0.U(32.W))
+  when(status === sm.firstBurst && io.in.valid && io.in.ready){
+    when(io.in.bits.rlast.asBool()){
+      status := sm.firstBurst
+    }.elsewhen(get_flag(io.in.bits.rid)){
+      status := sm.remainingBurst_edge
     }.otherwise{
-      counter := next_counter
-      araddr := araddr + (max_vertex_read_per_transaction << 2).asUInt()
+      status := sm.remainingBurst_embedding
+    }
+  }.elsewhen((status === sm.remainingBurst_edge  || status === sm.remainingBurst_embedding)
+    && io.in.valid && io.in.ready && io.in.bits.rlast.asBool()){
+    status := sm.firstBurst
+  }
+  val traveled_edges_reg = RegInit(0.U(64.W))
+  when(io.signal){
+    traveled_edges_reg := 0.U
+  }.elsewhen(io.in.valid && io.in.ready && !get_flag(io.in.bits.rid)
+    && status === sm.firstBurst){
+    traveled_edges_reg := traveled_edges_reg + get_edge_count(io.in.bits.rdata)
+  }
+  io.traveled_edges := traveled_edges_reg
+
+  //convert axi read channel to axis
+  val num_regfile = Module(new regFile(32, 64))
+  when(status === sm.firstBurst
+    && io.in.valid && io.in.ready && !io.in.bits.rlast.asBool()){
+    when(get_flag(io.in.bits.rid)){
+      num := Mux(get_edge_count(num_regfile.io.dataOut) > 4.U, get_edge_count(num_regfile.io.dataOut) - 4.U, 0.U)
+    }.otherwise{
+      num := Mux(get_edge_count(io.in.bits.rdata) > 2.U,
+        get_edge_count(io.in.bits.rdata) - 2.U, 0.U)
+    }
+  }.elsewhen(status === sm.remainingBurst_edge && io.in.valid && io.in.ready){
+    when(io.in.bits.rlast.asBool()){
+      num := 0.U
+    }.otherwise{
+      num := num - KEEP_WIDTH.U
+    }
+  }.elsewhen(status === sm.remainingBurst_embedding && io.in.valid && io.in.ready){
+    when(io.in.bits.rlast.asBool()){
+      num := 0.U
+    }.otherwise{
+      num := Mux(num > KEEP_WIDTH.U, num - KEEP_WIDTH.U, 0.U)
     }
   }
 
+  val keep = Wire(Vec(KEEP_WIDTH, Bool()))
+  keep.zipWithIndex.map {
+    case(k, i) => {
+      k := false.B
+      when(status === sm.firstBurst && get_flag(io.in.bits.rid)){
+        k := get_edge_count(num_regfile.io.dataOut) > i.U
+      }.elsewhen(status === sm.firstBurst && !get_flag(io.in.bits.rid)){
+        if(i <= 1){
+          k := false.B
+        }else{
+          k := get_edge_count(io.in.bits.rdata) > (i - 2).U
+        }
+      }.elsewhen(status === sm.remainingBurst_edge || status === sm.remainingBurst_embedding){
+        k := num > i.U
+      }
+    }
+  }
+  io.xbar_out.valid := io.in.valid && io.in.ready
+  io.xbar_out.bits.tdata := io.in.bits.rdata
+  io.xbar_out.bits.tlast := io.in.bits.rlast
+  io.xbar_out.bits.tkeep := keep.asUInt()
+
+  //buffer read edge array requests
+  val edge_read_buffer = Module(new BRAM_fifo(32, 72, "meta_fifo"))
+  val max_vertex_read_per_transaction = 64.U
+  val edge_read_buffer_din = Wire(new request())
+  edge_read_buffer.io.clk := clock.asBool()
+  edge_read_buffer.io.srst := reset.asBool()
+  edge_read_buffer_din.count := get_edge_count(io.in.bits.rdata(63, 0)) - EMBEDDING.asUInt()
+  edge_read_buffer_din.index := get_edge_array_index(io.in.bits.rdata(63, 0))
+  edge_read_buffer_din.is_new := true.B
+  edge_read_buffer_din.reg_ptr := 0.U
+  edge_read_buffer.io.wr_en := false.B
+  edge_read_buffer.io.rd_en := false.B
+  edge_read_buffer.io.din := edge_read_buffer_din.asUInt()
+  when(io.in.valid && io.in.ready & (status === sm.firstBurst)){
+    edge_read_buffer.io.wr_en := true.B
+    when(get_flag(io.in.bits.rid)){
+      edge_read_buffer_din.is_new := false.B
+      edge_read_buffer_din.reg_ptr := get_ptr(io.in.bits.rid)
+      when(get_edge_count(num_regfile.io.dataOut) > max_vertex_read_per_transaction){
+        edge_read_buffer_din.count :=
+          get_edge_count(num_regfile.io.dataOut) - max_vertex_read_per_transaction
+        edge_read_buffer_din.index :=
+          get_edge_array_index(num_regfile.io.dataOut) + max_vertex_read_per_transaction
+      }.otherwise{
+        edge_read_buffer_din.count := 0.U
+      }
+    }.otherwise{
+      when(get_edge_count(io.in.bits.rdata) < EMBEDDING.asUInt()){
+        edge_read_buffer_din.count := 0.U
+      }
+    }
+  }
+  io.in.ready := (edge_read_buffer.io.full === false.B | status =/= sm.firstBurst) && io.xbar_out.ready
+
+  //handle requests
+  val edge_read_buffer_dout =  edge_read_buffer.io.dout.asTypeOf(new request())
+  val remainning_edges = edge_read_buffer_dout.count
+  val min_credit_for_expand = 4.U
+  object cache_sm extends ChiselEnum {
+    val idole = Value(0x0.U)
+    val expand_old_request  = Value(0x1.U) // i "load"  -> 000_0011
+    val new_request = Value(0x2.U)
+    val update_request = Value(0x3.U)
+    val rm_request = Value(0x4.U)
+    val expand_new_request = Value(0x5.U)
+    val fill_free_queue = Value(0x6.U)
+    val release_credit = Value(0x7.U)
+    val expand_fin = Value(0x8.U)
+    val reset = Value(0x9.U)
+  }
+  val cache_status = RegInit(cache_sm.reset)
+  val free_queue = Module(new BRAM_fifo(32, 6, "free_queue"))
+  val init_seq = RegInit(0.U(6.W))
+  when(cache_status === cache_sm.fill_free_queue){
+    init_seq := init_seq + 1.U
+  }
+  val expand_index = RegInit(0.U(32.W))
+  val expand_count = RegInit(0.U(32.W))
+  val credit = RegInit(32.U(32.W))
+  when(cache_status === cache_sm.reset && init_seq === 0.U){
+    cache_status := cache_sm.fill_free_queue
+  }.elsewhen(cache_status === cache_sm.fill_free_queue && init_seq === 31.U){
+    cache_status := cache_sm.idole
+  }.elsewhen(cache_status === cache_sm.idole && edge_read_buffer.is_valid()){
+    when(edge_read_buffer_dout.is_new === true.B){
+      when(remainning_edges === 0.U){
+        cache_status := cache_sm.release_credit
+      }.otherwise{
+        when(remainning_edges > max_vertex_read_per_transaction && credit > min_credit_for_expand){
+          cache_status := cache_sm.expand_new_request
+          expand_index := edge_read_buffer_dout.index
+          expand_count := edge_read_buffer_dout.count
+        }.otherwise{
+          cache_status := cache_sm.new_request
+        }
+      }
+    }.otherwise{
+      when(remainning_edges === 0.U){
+        cache_status := cache_sm.rm_request
+      }.otherwise{
+        when(remainning_edges > max_vertex_read_per_transaction && credit > min_credit_for_expand){
+          cache_status := cache_sm.expand_old_request
+          expand_index := edge_read_buffer_dout.index
+          expand_count := edge_read_buffer_dout.count
+        }.otherwise{
+          cache_status := cache_sm.update_request
+        }
+      }
+    }
+  }.elsewhen(io.out.ready && io.out.valid && cache_status === cache_sm.new_request){
+    cache_status := cache_sm.idole
+    edge_read_buffer.io.rd_en := true.B
+  }.elsewhen(io.out.ready && io.out.valid && cache_status === cache_sm.update_request){
+    cache_status := cache_sm.idole
+    edge_read_buffer.io.rd_en := true.B
+  }.elsewhen(cache_status === cache_sm.release_credit){
+    cache_status := cache_sm.idole
+    edge_read_buffer.io.rd_en := true.B
+  }.elsewhen(cache_status === cache_sm.rm_request){
+    cache_status := cache_sm.idole
+    edge_read_buffer.io.rd_en := true.B
+  }.elsewhen(io.out.ready && io.out.valid && cache_status === cache_sm.expand_new_request){
+    expand_index := expand_index + max_vertex_read_per_transaction
+    expand_count := expand_count - max_vertex_read_per_transaction
+    when(credit <= min_credit_for_expand || expand_count <= (max_vertex_read_per_transaction << 1.U).asUInt()){
+      cache_status := cache_sm.expand_fin
+    }
+  }.elsewhen(io.out.ready && io.out.valid && cache_status === cache_sm.expand_old_request){
+    expand_index := expand_index + max_vertex_read_per_transaction
+    expand_count := expand_count - max_vertex_read_per_transaction
+    when(credit <= min_credit_for_expand || expand_count <= (max_vertex_read_per_transaction << 1.U).asUInt()){
+      cache_status := cache_sm.expand_fin
+    }.otherwise{
+      cache_status := cache_sm.expand_new_request
+    }
+  }.elsewhen(io.out.ready && io.out.valid && cache_status === cache_sm.expand_fin){
+    cache_status := cache_sm.idole
+    edge_read_buffer.io.rd_en := true.B
+  }
+
+  //send axi read requests
   val num_vertex = MuxCase(max_vertex_read_per_transaction, Array(
-    (cache_status === cache_sm.idole && remainning_edges <= max_vertex_read_per_transaction) -> (remainning_edges),
-    (cache_status === cache_sm.next_page && counter <= max_vertex_read_per_transaction) -> counter
+    (cache_status === cache_sm.expand_fin && expand_count <= max_vertex_read_per_transaction) ->
+      expand_count,
+    (remainning_edges <= max_vertex_read_per_transaction) -> (remainning_edges)
   ))
   var arlen = Mux(((num_vertex >> log2Ceil(AXI_DATA_WIDTH/4)) << log2Ceil(AXI_DATA_WIDTH/4)).asUInt() < num_vertex,
     (num_vertex >> log2Ceil(AXI_DATA_WIDTH/4)),
     (num_vertex >> log2Ceil(AXI_DATA_WIDTH/4)).asUInt() - 1.U)
-  io.out.bits.araddr := Mux(cache_status === cache_sm.idole,
-    io.edge_base_addr + (get_edge_array_index(edge_read_buffer.io.dout) << 2),
-    araddr)
-  io.out.valid := Mux(cache_status === cache_sm.idole, edge_read_buffer.is_valid(), true.B) && io.inflight_vtxs < 32.U
+  io.out.bits.araddr :=
+    io.edge_base_addr +
+      (Mux(cache_status === cache_sm.expand_fin | cache_status === cache_sm.expand_new_request |
+        cache_status === cache_sm.expand_old_request,
+        expand_index, edge_read_buffer_dout.index) << 2.U).asUInt()
+  io.out.valid := cache_status === cache_sm.new_request | cache_status === cache_sm.update_request |
+    cache_status === cache_sm.expand_fin | cache_status === cache_sm.expand_new_request |
+    cache_status === cache_sm.expand_old_request
   io.out.bits.arlen := arlen.asUInt()
   io.out.bits.arburst := 1.U(2.W)
   io.out.bits.arlock := 0.U
   io.out.bits.arsize := MuxCase(log2Ceil(AXI_DATA_WIDTH).U(AXI_SIZE_WIDTH.W), Seq.tabulate(log2Ceil(AXI_DATA_WIDTH/4))(
     x => ((num_vertex <= Seq.tabulate(log2Ceil(AXI_DATA_WIDTH/4))(i => 1 << i)(x).asUInt()) -> (x + 2).asUInt())
   ))
-  io.out.bits.arid := Cat(1.U(1.W), io.free_ptr.asTypeOf(UInt((AXI_ID_WIDTH- 1).W)))
+  io.out.bits.arid := Cat(1.U(1.W),
+    Mux(cache_status === cache_sm.new_request | cache_status === cache_sm.expand_new_request |
+      cache_status === cache_sm.expand_fin, free_queue.io.dout.asTypeOf(UInt((AXI_ID_WIDTH- 1).W)),
+      edge_read_buffer_dout.reg_ptr.asTypeOf(UInt((AXI_ID_WIDTH- 1).W))))
 
-  edge_read_buffer.io.rd_en := io.out.ready & cache_status === cache_sm.idole && io.inflight_vtxs < 32.U
-  io.read_edge_num := num_vertex
+  //buffer read request info in num_regfile
+  num_regfile.io.writeFlag := false.B
+  num_regfile.io.wptr := 0.U
+  num_regfile.io.dataIn := 0.U
+  num_regfile.io.rptr := get_ptr(io.in.bits.rid)
+  free_queue.io.clk := clock.asBool()
+  free_queue.io.srst := reset.asBool()
+  free_queue.io.rd_en := false.B
+  free_queue.io.din := 0.U
+  free_queue.io.wr_en := false.B
+  when(cache_status === cache_sm.new_request){
+    num_regfile.io.wptr := free_queue.io.dout
+    free_queue.io.rd_en := io.out.ready && io.out.valid
+    num_regfile.io.writeFlag := free_queue.is_valid() && io.out.ready && io.out.valid
+    num_regfile.io.dataIn := Cat(edge_read_buffer_dout.count,
+      edge_read_buffer_dout.index)
+  }.elsewhen(cache_status === cache_sm.update_request){
+    num_regfile.io.wptr := edge_read_buffer_dout.reg_ptr
+    num_regfile.io.writeFlag := io.out.ready && io.out.valid
+    num_regfile.io.dataIn := Cat(edge_read_buffer_dout.count,
+      edge_read_buffer_dout.index)
+  }.elsewhen(cache_status === cache_sm.rm_request){
+    free_queue.io.din := edge_read_buffer_dout.reg_ptr
+    free_queue.io.wr_en := true.B
+  }.elsewhen(cache_status === cache_sm.fill_free_queue){
+    free_queue.io.din :=  init_seq
+    free_queue.io.wr_en := true.B
+  }.elsewhen(cache_status === cache_sm.expand_new_request){
+    num_regfile.io.wptr := free_queue.io.dout
+    free_queue.io.rd_en := io.out.ready && io.out.valid
+    num_regfile.io.writeFlag := free_queue.is_valid() && io.out.ready && io.out.valid
+    num_regfile.io.dataIn := Cat(max_vertex_read_per_transaction,
+      expand_index)
+  }.elsewhen(cache_status === cache_sm.expand_old_request){
+    num_regfile.io.wptr := edge_read_buffer_dout.reg_ptr
+    num_regfile.io.writeFlag := io.out.ready && io.out.valid
+    num_regfile.io.dataIn := Cat(max_vertex_read_per_transaction,
+      expand_index)
+  }.elsewhen(cache_status === cache_sm.expand_fin){
+    num_regfile.io.wptr := free_queue.io.dout
+    free_queue.io.rd_en := io.out.ready && io.out.valid
+    num_regfile.io.writeFlag := free_queue.is_valid() && io.out.ready && io.out.valid
+    num_regfile.io.dataIn := Cat(expand_count,
+      expand_index)
+  }
+
   io.read_edge_fifo_empty := edge_read_buffer.is_empty() && cache_status === cache_sm.idole
+
+  val credit_dec = io.out.ready && io.out.valid && cache_status === cache_sm.expand_new_request |
+    io.out.ready && io.out.valid && cache_status === cache_sm.expand_old_request |
+    io.credit_dec
+  when(credit_dec && cache_status =/= cache_sm.release_credit &&
+    cache_status =/= cache_sm.rm_request){
+    credit := credit - 1.U
+  }.elsewhen(!credit_dec && (cache_status === cache_sm.release_credit ||
+    cache_status === cache_sm.rm_request)){
+    credit := credit + 1.U
+  }
+  io.credit := credit
 }
 
 class Broadcast(AXI_ADDR_WIDTH : Int = 64, AXI_DATA_WIDTH: Int, AXI_ID_WIDTH: Int = 6, AXI_SIZE_WIDTH: Int = 3,
@@ -492,7 +725,7 @@ class Broadcast(AXI_ADDR_WIDTH : Int = 64, AXI_DATA_WIDTH: Int, AXI_ID_WIDTH: In
   assert(AXI_ID_WIDTH > log2Ceil(32))
 
   def vid2addr(vid: UInt) : UInt = {
-    io.embedding_base_addr + (vid(30, log2Ceil(FPGA_Num)) << log2Ceil(4 * EMBEDDING + 8))
+    io.embedding_base_addr + (vid(30, log2Ceil(FPGA_Num)) << log2Ceil(4 * EMBEDDING + 8)).asUInt()
   }
 
   //upward
@@ -505,8 +738,6 @@ class Broadcast(AXI_ADDR_WIDTH : Int = 64, AXI_DATA_WIDTH: Int, AXI_ID_WIDTH: In
   }
   val upward_status = RegInit(upward_sm.idole)
   val inflight_vtxs = RegInit(0.U(64.W))
-  val traveled_edges_reg = RegInit(0.U(64.W))
-  io.traveled_edges := traveled_edges_reg
 
   //read offset and edge embedding array
   val vertex_read_buffer = Module(new BRAM_fifo(32, 32, "vid_fifo"))
@@ -515,138 +746,55 @@ class Broadcast(AXI_ADDR_WIDTH : Int = 64, AXI_DATA_WIDTH: Int, AXI_ID_WIDTH: In
   vertex_read_buffer.io.wr_en := io.gather_in.valid
   vertex_read_buffer.io.din := io.gather_in.bits.tdata
   io.gather_in.ready := vertex_read_buffer.io.full === false.B
-  val vertex_read_id = Wire(UInt(AXI_ID_WIDTH.W))
-  vertex_read_id := Cat(0.U(1.W), vertex_read_buffer.io.data_count.asTypeOf(UInt((AXI_ID_WIDTH- 1).W)))
 
   val edge_cache = Module(new readEdge_engine(AXI_ADDR_WIDTH, AXI_DATA_WIDTH, AXI_ID_WIDTH, AXI_SIZE_WIDTH, EMBEDDING,
     Broadcast_Num, Broadcast_index))
   edge_cache.io.edge_base_addr := io.edge_base_addr
-  edge_cache.io.inflight_vtxs := inflight_vtxs
-  val r_demux = Module(new axis_broadcaster(AXI_DATA_WIDTH, 2, "r_demux", AXI_ID_WIDTH))
-  val r_demux_out = Wire(Vec(2, Decoupled(new axir(AXI_DATA_WIDTH, AXI_ID_WIDTH))))
-  r_demux.io.s_axis.tvalid := io.ddr_r.valid
-  r_demux.io.s_axis.tdata := io.ddr_r.bits.rdata
-  r_demux.io.s_axis.tlast := io.ddr_r.bits.rlast
-  r_demux.io.s_axis.disable_tkeep()
-  r_demux.io.s_axis.tid := io.ddr_r.bits.rid
-  r_demux.io.aclk := clock.asBool()
-  r_demux.io.aresetn := ~reset.asBool()
-  io.ddr_r.ready := r_demux.io.s_axis.tready
-  r_demux_out.zipWithIndex.map{
-    case (r, i) => {
-      r.valid := r_demux.io.m_axis.tvalid(i)
-      r.bits.rid := r_demux.io.m_axis.tid(AXI_ID_WIDTH * (i + 1) - 1, AXI_ID_WIDTH * i)
-      r.bits.rlast := r_demux.io.m_axis.tlast(i)
-      r.bits.rdata := r_demux.io.m_axis.tdata(8 * AXI_DATA_WIDTH * (i + 1) - 1, 8 * AXI_DATA_WIDTH * i)
-    }
-  }
-  r_demux.io.m_axis.tready := VecInit.tabulate(2)(i => r_demux_out(i).ready).asUInt()
-  edge_cache.io.in <> r_demux_out(1)
+  edge_cache.io.in <> io.ddr_r
+  io.traveled_edges := edge_cache.io.traveled_edges
+  edge_cache.io.signal := io.signal
 
   val arbi = Module(new AMBA_Arbiter(new axiar(AXI_ADDR_WIDTH, AXI_ID_WIDTH, AXI_SIZE_WIDTH, 1), 2))
+  val vertex_read_id = RegInit(0.U((AXI_ID_WIDTH- 1).W))
+  when(arbi.io.in(1).valid && arbi.io.in(1).ready){
+    vertex_read_id := vertex_read_id + 1.U
+  }
   io.ddr_ar <> arbi.io.out
   arbi.io.in(1).bits.araddr :=  vid2addr(vertex_read_buffer.io.dout)
-  arbi.io.in(1).valid :=  vertex_read_buffer.is_valid() && vertex_read_buffer.io.dout(31) === 0.U && inflight_vtxs < 32.U
+  arbi.io.in(1).valid :=  vertex_read_buffer.is_valid() && vertex_read_buffer.io.dout(31) === 0.U &&
+    edge_cache.io.credit =/= 0.U
   arbi.io.in(1).bits.arlen := ((4 * EMBEDDING + 8) / AXI_DATA_WIDTH - 1).asUInt()
   arbi.io.in(1).bits.arburst := 1.U(2.W)
   arbi.io.in(1).bits.arlock := 0.U
   arbi.io.in(1).bits.arsize :=  log2Ceil(AXI_DATA_WIDTH).U(AXI_SIZE_WIDTH.W)
-  arbi.io.in(1).bits.arid :=  vertex_read_id
-  vertex_read_buffer.io.rd_en := (arbi.io.in(1).ready && inflight_vtxs < 32.U) | upward_status === upward_sm.output_fin
+  arbi.io.in(1).bits.arid :=  Cat(0.U(1.W), vertex_read_id)
+  vertex_read_buffer.io.rd_en := (arbi.io.in(1).ready && edge_cache.io.credit =/= 0.U) | upward_status === upward_sm.output_fin
   arbi.io.in(0) <> edge_cache.io.out
+  edge_cache.io.credit_dec := arbi.io.in(1).valid && arbi.io.in(1).ready
 
   val (ar_ready_counter, ar_b_1) = Counter(io.ddr_r.valid === false.B,
     0xffffffff)
   dontTouch(ar_ready_counter)
 
-  //front end of down ward
-  val num_regfile = Module(new regFile(32, 32))
-  num_regfile.io.writeFlag := arbi.io.in(0).ready & arbi.io.in(0).valid
-  num_regfile.io.wptr := num_regfile.io.wcount
-  num_regfile.io.dataIn := edge_cache.io.read_edge_num
-  num_regfile.io.rptr := edge_cache.get_ptr(r_demux_out(0).bits.rid)
-  edge_cache.io.free_ptr := num_regfile.io.wcount
-
   //back end of down ward
   val KEEP_WIDTH = AXI_DATA_WIDTH / 4
-  object sm extends ChiselEnum {
-    //val idole = Value(0x0.U)
-    val firstBurst  = Value(0x0.U) // i "load"  -> 000_0011
-    val remainingBurst_embedding   = Value(0x1.U) // i "imm"   -> 001_0011
-    val remainingBurst_edge   = Value(0x2.U)
-  }
-  val status = RegInit(sm.firstBurst)
-  val num = RegInit(0.U(32.W))
-  when(status === sm.firstBurst && r_demux_out(0).valid.asBool() && r_demux_out(0).ready.asBool()){
-    when(r_demux_out(0).bits.rlast.asBool()){
-      status := sm.firstBurst
-    }.elsewhen(edge_cache.get_flag(r_demux_out(0).bits.rid)){
-      status := sm.remainingBurst_edge
-    }.otherwise{
-      status := sm.remainingBurst_embedding
-    }
-  }.elsewhen((status === sm.remainingBurst_edge  || status === sm.remainingBurst_embedding)
-            && r_demux_out(0).valid.asBool() && r_demux_out(0).ready.asBool() && r_demux_out(0).bits.rlast.asBool()){
-      status := sm.firstBurst
-  }
-
-  when(status === sm.firstBurst
-      && r_demux_out(0).valid.asBool() && r_demux_out(0).ready.asBool() && !r_demux_out(0).bits.rlast.asBool()){
-    when(edge_cache.get_flag(r_demux_out(0).bits.rid)){
-      num := Mux(num_regfile.io.dataOut > 4.U, num_regfile.io.dataOut - 4.U, 0.U)
-    }.otherwise{
-      num := Mux(edge_cache.get_edge_count(r_demux_out(0).bits.rdata) > 2.U,
-        edge_cache.get_edge_count(r_demux_out(0).bits.rdata) - 2.U, 0.U)
-    }
-  }.elsewhen(status === sm.remainingBurst_edge && r_demux_out(0).valid.asBool() && r_demux_out(0).ready.asBool()){
-    when(r_demux_out(0).bits.rlast.asBool()){
-      num := 0.U
-    }.otherwise{
-      num := num - KEEP_WIDTH.U
-    }
-  }.elsewhen(status === sm.remainingBurst_embedding && r_demux_out(0).valid.asBool() && r_demux_out(0).ready.asBool()){
-    when(r_demux_out(0).bits.rlast.asBool()){
-      num := 0.U
-    }.otherwise{
-      num := Mux(num > KEEP_WIDTH.U, num - KEEP_WIDTH.U, 0.U)
-    }
-  }
-
-  val keep = Wire(Vec(KEEP_WIDTH, Bool()))
-  keep.zipWithIndex.map {
-    case(k, i) => {
-      k := false.B
-      when(status === sm.firstBurst && edge_cache.get_flag(r_demux_out(0).bits.rid)){
-        k := num_regfile.io.dataOut > i.U
-      }.elsewhen(status === sm.firstBurst && !edge_cache.get_flag(r_demux_out(0).bits.rid)){
-        if(i <= 1){
-          k := false.B
-        }else{
-          k := edge_cache.get_edge_count(r_demux_out(0).bits.rdata) > (i - 2).U
-        }
-      }.elsewhen(status === sm.remainingBurst_edge || status === sm.remainingBurst_embedding){
-        k := num > i.U
-      }
-    }
-  }
-
   val vertex_out_fifo = Module(new axis_data_count_fifo(AXI_DATA_WIDTH, "edge_fifo"))
   vertex_out_fifo.io.s_axis_aresetn := !reset.asBool()
   vertex_out_fifo.io.s_axis_aclk := clock.asBool()
   vertex_out_fifo.io.m_axis.connectto(io.xbar_out.bits, 0)
   io.xbar_out.valid := vertex_out_fifo.io.m_axis.tvalid
   vertex_out_fifo.io.m_axis.tready := io.xbar_out.ready
-  vertex_out_fifo.io.s_axis.tvalid := r_demux_out(0).valid | upward_status === upward_sm.output_fin | io.start
-  vertex_out_fifo.io.s_axis.tdata := MuxCase(r_demux_out(0).bits.rdata, Array(
+  vertex_out_fifo.io.s_axis.tvalid := edge_cache.io.xbar_out.valid | upward_status === upward_sm.output_fin | io.start
+  vertex_out_fifo.io.s_axis.tdata := MuxCase(edge_cache.io.xbar_out.bits.tdata, Array(
     io.start -> io.root,
     (upward_status === upward_sm.output_fin) -> "x80000000".asUInt((AXI_DATA_WIDTH * 8).W)
   ))
-  vertex_out_fifo.io.s_axis.tkeep := MuxCase(keep.asUInt(), Array(
+  vertex_out_fifo.io.s_axis.tkeep := MuxCase(edge_cache.io.xbar_out.bits.tkeep, Array(
     io.start -> 0x1.U(KEEP_WIDTH.W),
     (upward_status === upward_sm.output_fin) -> 0x1.U(KEEP_WIDTH.W)
   ))
   vertex_out_fifo.io.s_axis.tlast := true.B
-  r_demux_out(0).ready := vertex_out_fifo.io.s_axis.tready
+  edge_cache.io.xbar_out.ready := vertex_out_fifo.io.s_axis.tready
 
   val (edge_fifo_ready_counter, b_1) = Counter(vertex_out_fifo.io.s_axis.tready === 0.U, 0x10000000)
   dontTouch(edge_fifo_ready_counter)
@@ -682,13 +830,6 @@ class Broadcast(AXI_ADDR_WIDTH : Int = 64, AXI_DATA_WIDTH: Int, AXI_ID_WIDTH: In
 
   val (ready_counter, b) = Counter(upward_status === upward_sm.sync, 0x10000000)
   dontTouch(ready_counter)
-
-  when(io.signal){
-    traveled_edges_reg := 0.U
-  }.elsewhen(r_demux_out(0).valid.asBool() && r_demux_out(0).ready.asBool() && !edge_cache.get_flag(r_demux_out(0).bits.rid)
-    && status === sm.firstBurst){
-    traveled_edges_reg := traveled_edges_reg + edge_cache.get_edge_count(r_demux_out(0).bits.rdata)
-  }
 
   when(io.ddr_ar.valid && io.ddr_ar.ready
     && io.ddr_r.valid.asBool() && io.ddr_r.ready.asBool() && io.ddr_r.bits.rlast.asBool()){
