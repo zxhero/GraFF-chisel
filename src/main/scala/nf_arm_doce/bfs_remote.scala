@@ -2,7 +2,7 @@ package remote
 
 import chisel3._
 import chisel3.experimental.ChiselEnum
-import chisel3.util.{Arbiter, Cat, Decoupled, Mux1H, MuxCase, log2Ceil}
+import chisel3.util.{Arbiter, Cat, Decoupled, Mux1H, MuxCase, ValidIO, log2Ceil}
 import nf_arm_doce._
 import utils._
 
@@ -160,10 +160,69 @@ class flow_control(FPGA_Num: Int) extends Module{
   val io = IO(new Bundle() {
     val data = Input(UInt(512.W))
     val keep = Input(UInt(16.W))
-    val pending = Output(UInt(32.W))
+    val handshake = Input(Bool()) // less than 2k
+    val handshake_last = Input(Bool())
+    val period = Input(UInt(32.W))
+    val pending = ValidIO(UInt(32.W))
+    val parameter = Input(UInt(32.W))
+    val idol_fpga_num = Input(UInt(log2Ceil(FPGA_Num).W))
   })
 
-  io.pending := FPGA_Num.U
+  val hittable = Wire(Vec(16, Vec(16, Bool())))
+  dontTouch(hittable)
+  io.data.asTypeOf(Vec(16, UInt(32.W))).zipWithIndex.map{
+    case(d, x) => {
+      for (i <- 15 to 0 by -1){
+        when(i.U === d(log2Ceil(16) + log2Ceil(FPGA_Num) - 1, log2Ceil(FPGA_Num))){
+          hittable(x)(i) := io.keep(x)
+        }.otherwise{
+          hittable(x)(i) := false.B
+        }
+      }
+    }
+  }
+  val timing = RegInit(0.U(32.W))
+  when(io.handshake && io.handshake_last){
+    when(timing === (io.period - 1.U)){
+      timing := 0.U
+    }.otherwise{
+      timing := timing + 1.U
+    }
+  }
+  val count = VecInit(Seq.tabulate(16)(x => hittable.map(h => h(x).asTypeOf(UInt(5.W))).reduce(_+_)))
+  dontTouch(count)
+  val count_reg = RegInit(VecInit(Seq.fill(16)(0.U(16.W))))
+  count_reg.zip(count).map{
+    case(cr, c) => {
+      when(io.handshake){
+        when(timing === (io.period - 1.U) && io.handshake_last){
+          cr := c
+        }.otherwise{
+          cr := cr + c
+        }
+      }
+    }
+  }
+
+  //tree structure to find max in count_reg
+  val layer1 = Seq.tabulate(8)(x => Mux(count_reg(2*x) > count_reg(2*x+1), count_reg(2*x), count_reg(2*x+1)))
+  val layer2 = Seq.tabulate(4)(x => Mux(layer1(2*x) > layer1(2*x+1), layer1(2*x), layer1(2*x+1)))
+  val layer3 = Seq.tabulate(2)(x => Mux(layer2(2*x) > layer2(2*x+1), layer2(2*x), layer2(2*x+1)))
+  val max_a = Mux(layer3(0) > layer3(1), layer3(0), layer3(1))
+
+  val pending_options = (VecInit.tabulate(FPGA_Num)(
+    x => {
+      if(x == 0){
+        max_a.asTypeOf(UInt(20.W))
+      }else if(x % 2 == 0){
+        (max_a.asTypeOf(UInt(16.W)) << log2Ceil(x).U(4.W)).asUInt() + max_a.asTypeOf(UInt(20.W))
+      }else{
+        (max_a.asTypeOf(UInt(16.W)) << log2Ceil(x+1).U(4.W)).asUInt()
+      }
+    }
+  ))
+  io.pending.bits := pending_options(FPGA_Num.U - io.idol_fpga_num - 1.U) - io.parameter
+  io.pending.valid := timing === (io.period - 1.U) && io.handshake && io.handshake_last
 }
 
 class Remote_Apply(AXIS_DATA_WIDTH: Int, Local_Scatter_Num: Int, FPGA_Num: Int, Remote_ID : Int) extends Module {
@@ -182,6 +241,8 @@ class Remote_Apply(AXIS_DATA_WIDTH: Int, Local_Scatter_Num: Int, FPGA_Num: Int, 
     val packet_size = Input(UInt(32.W))
     val level = Input(UInt(32.W))
     val pending_time = Input(UInt(32.W))
+    val pending_parameter = Input(UInt(32.W))
+    val idol_fpga_num = Input(UInt(log2Ceil(FPGA_Num).W))
   })
 
   val level = RegInit(0.U(32.W))
@@ -273,7 +334,6 @@ class Remote_Apply(AXIS_DATA_WIDTH: Int, Local_Scatter_Num: Int, FPGA_Num: Int, 
   val send_count = RegInit(0.U(32.W))
   val pending_time = RegInit(0.U(32.W))
   val extra_time = RegInit(0.U(32.W))
-  val next_pending = RegInit(0.U(32.W))
   val flow_control_unit = Module(new flow_control(FPGA_Num))
   io.remote_out.bits.tkeep := vertex_in_fifo.io.m_axis.tkeep
   io.remote_out.bits.tdata := vertex_in_fifo.io.m_axis.tdata
@@ -281,23 +341,21 @@ class Remote_Apply(AXIS_DATA_WIDTH: Int, Local_Scatter_Num: Int, FPGA_Num: Int, 
   io.remote_out.bits.tlast := send_count === (io.packet_size - 1.U) | vertex_in_fifo_data_count === 1.U
   flow_control_unit.io.data := vertex_in_fifo.io.m_axis.tdata
   flow_control_unit.io.keep := vertex_in_fifo.io.m_axis.tkeep
-  when(io.remote_out.valid && io.remote_out.ready){
-    when(io.remote_out.bits.tlast){
-      next_pending := 0.U
-    }.otherwise{
-      next_pending := flow_control_unit.io.pending
-    }
-  }
-  when(io.remote_out.valid && io.remote_out.ready && io.remote_out.bits.tlast){
+  flow_control_unit.io.handshake := io.remote_out.valid && io.remote_out.ready
+  flow_control_unit.io.handshake_last := io.remote_out.bits.tlast
+  flow_control_unit.io.period := io.pending_time
+  flow_control_unit.io.parameter := io.pending_parameter
+  flow_control_unit.io.idol_fpga_num := io.idol_fpga_num
+  when(flow_control_unit.io.pending.valid){
     extra_time := 0.U
   }.elsewhen(pending_time === 0.U){
     extra_time := extra_time + 1.U
   }
   io.remote_out.valid := false.B
   vertex_in_fifo.io.m_axis.tready := false.B
-  when(io.remote_out.valid && io.remote_out.ready && io.remote_out.bits.tlast){
-    pending_time := Mux(extra_time > next_pending + flow_control_unit.io.pending - 1.U,
-      0.U, next_pending + flow_control_unit.io.pending - 1.U - extra_time)
+  when(flow_control_unit.io.pending.valid){
+    pending_time := Mux(extra_time > flow_control_unit.io.pending.bits,
+      0.U, flow_control_unit.io.pending.bits - extra_time)
   }.elsewhen(pending_time =/= 0.U){
     pending_time := pending_time - 1.U
   }
@@ -418,6 +476,7 @@ class Remote_Scatter(AXI_ADDR_WIDTH : Int = 64, AXI_DATA_WIDTH: Int, AXI_ID_WIDT
     val issue_sync_phase2 = Output(Vec(FPGA_Num, Bool()))
     val remote_unvisited_size = Output(UInt(32.W))
     val local_fpga_id = Input(UInt(log2Ceil(FPGA_Num).W))
+    val idol_fpga_num = Output(UInt(log2Ceil(FPGA_Num).W))
   })
 
   //tie off not used channel
@@ -451,6 +510,7 @@ class Remote_Scatter(AXI_ADDR_WIDTH : Int = 64, AXI_DATA_WIDTH: Int, AXI_ID_WIDT
   }
   io.issue_sync_phase2 := VecInit(Seq.fill(FPGA_Num)(syncs.map(x=>(x > 0.U)).reduce(_&_)))
   io.issue_sync := syncs.map(x=>(x === 2.U)).reduce(_&_)
+  io.idol_fpga_num := syncs.map(x=>(x > 0.U).asTypeOf(UInt(FPGA_Num.W))).reduce(_+_) - 1.U
   vertex_in_fifo.io.m_axis.connectto(io.xbar_out.bits, 0)
   io.xbar_out.bits.tlast := true.B
   vertex_in_fifo.io.m_axis.tready := MuxCase(io.xbar_out.ready, Array(

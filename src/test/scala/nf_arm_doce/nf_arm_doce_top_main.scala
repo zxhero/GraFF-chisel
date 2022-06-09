@@ -142,6 +142,7 @@ class BFS_ps(AXI_ADDR_WIDTH : Int = 64, AXI_DATA_WIDTH: Int = 64, AXI_ID_WIDTH: 
       r.io.level := controls.io.level
       r.io.pending_time := controls.GetRegByName("pending_time")(15, 0)
       r.io.pending_parameter := controls.GetRegByName("pending_time")(31, 16)
+      r.io.idol_fpga_num := ReScatter.io.idol_fpga_num
     }
   }
   Applys.map{x => x.io.local_fpga_id := controls.GetRegByName("fpga_id")}
