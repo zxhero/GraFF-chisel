@@ -21,7 +21,6 @@ lazy val root = (project in file("."))
       "-P:chiselplugin:useBundlePlugin"
     ),
     addCompilerPlugin("edu.berkeley.cs" % "chisel3-plugin" % "3.4.3" cross CrossVersion.full),
-    addCompilerPlugin("org.scalamacros" % "paradise" % "2.1.1" cross CrossVersion.full),
-    addSbtPlugin("com.github.scct" % "sbt-scct" % "0.2")
+    addCompilerPlugin("org.scalamacros" % "paradise" % "2.1.1" cross CrossVersion.full)
   )
 
