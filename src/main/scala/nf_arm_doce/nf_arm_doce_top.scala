@@ -128,16 +128,10 @@ class streamdata_blackbox(AXIS_DATA_WIDTH: Int = 8, ELEMENT_WIDTH: Int = 1, num 
   }
 }
 
-class streamdata_bare_blackbox(AXIS_DATA_WIDTH: Int = 8, ELEMENT_WIDTH: Int = 1, num : Int = 1) extends Bundle {
-  val tdata = Input(UInt((8 * AXIS_DATA_WIDTH * num).W))
+class streamdata_bare_blackbox(AXIS_DATA_WIDTH: Int = 8, ELEMENT_WIDTH: Int = 1, num : Int = 1)
+  extends streamdata_noKR_blackbox(AXIS_DATA_WIDTH, ELEMENT_WIDTH, num) {
   val tkeep = Input(UInt((num * AXIS_DATA_WIDTH / ELEMENT_WIDTH).W))
-  val tvalid = Input(UInt(num.W))
   val tready = Output(UInt(num.W))
-
-  def get_ith_data(i: Int): UInt = {
-    assert(i < (AXIS_DATA_WIDTH / ELEMENT_WIDTH))
-    tdata((i + 1) * ELEMENT_WIDTH * 8 - 1, i * ELEMENT_WIDTH * 8)
-  }
 
   def connectfrom(d : (axisdata)) = {
     tdata := d.tdata
@@ -151,6 +145,16 @@ class streamdata_bare_blackbox(AXIS_DATA_WIDTH: Int = 8, ELEMENT_WIDTH: Int = 1,
 
   def disable_tkeep() = {
     tkeep := VecInit(Seq.fill(num * AXIS_DATA_WIDTH / ELEMENT_WIDTH)(true.B)).asUInt()
+  }
+}
+
+class streamdata_noKR_blackbox(AXIS_DATA_WIDTH: Int = 8, ELEMENT_WIDTH: Int = 1, num : Int = 1) extends Bundle {
+  val tdata = Input(UInt((8 * AXIS_DATA_WIDTH * num).W))
+  val tvalid = Input(UInt(num.W))
+
+  def get_ith_data(i: Int): UInt = {
+    assert(i < (AXIS_DATA_WIDTH / ELEMENT_WIDTH))
+    tdata((i + 1) * ELEMENT_WIDTH * 8 - 1, i * ELEMENT_WIDTH * 8)
   }
 }
 
