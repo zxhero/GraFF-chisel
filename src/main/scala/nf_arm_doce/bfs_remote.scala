@@ -183,7 +183,7 @@ class flow_control(FPGA_Num: Int) extends Module{
   }
   val timing = RegInit(0.U(32.W))
   when(io.handshake && io.handshake_last){
-    when(timing === (io.period - 1.U)){
+    when(timing === (io.period - 3.U)){
       timing := 0.U
     }.otherwise{
       timing := timing + 1.U
@@ -195,7 +195,7 @@ class flow_control(FPGA_Num: Int) extends Module{
   count_reg.zip(count).map{
     case(cr, c) => {
       when(io.handshake){
-        when(timing === (io.period - 1.U) && io.handshake_last){
+        when(timing === (io.period - 3.U) && io.handshake_last){
           cr := c
         }.otherwise{
           cr := cr + c
@@ -205,10 +205,41 @@ class flow_control(FPGA_Num: Int) extends Module{
   }
 
   //tree structure to find max in count_reg
-  val layer1 = Seq.tabulate(8)(x => Mux(count_reg(2*x) > count_reg(2*x+1), count_reg(2*x), count_reg(2*x+1)))
-  val layer2 = Seq.tabulate(4)(x => Mux(layer1(2*x) > layer1(2*x+1), layer1(2*x), layer1(2*x+1)))
-  val layer3 = Seq.tabulate(2)(x => Mux(layer2(2*x) > layer2(2*x+1), layer2(2*x), layer2(2*x+1)))
-  val max_a = Mux(layer3(0) > layer3(1), layer3(0), layer3(1))
+  val layer1 = Seq.fill(8)(Module(new axis_reg_slice(4, "flow_control_reg")))
+  layer1.zipWithIndex.map{
+    case (l, x) => {
+      l.io.aclk := clock.asBool()
+      l.io.aresetn := ~reset.asBool()
+      l.io.s_axis.tdata := Mux(count_reg(2*x) > count_reg(2*x+1), count_reg(2*x), count_reg(2*x+1))
+      l.io.s_axis.tvalid := timing === (io.period - 3.U) && io.handshake && io.handshake_last
+    }
+  }
+  val layer2 = Seq.fill(4)(Module(new axis_reg_slice(4, "flow_control_reg")))
+  layer2.zipWithIndex.map{
+    case(l, x) => {
+      l.io.aclk := clock.asBool()
+      l.io.aresetn := ~reset.asBool()
+      l.io.s_axis.tdata := Mux(layer1(2*x).io.m_axis.tdata > layer1(2*x+1).io.m_axis.tdata,
+        layer1(2*x).io.m_axis.tdata, layer1(2*x+1).io.m_axis.tdata)
+      l.io.s_axis.tvalid := layer1(2*x).io.m_axis.tvalid & layer1(2*x+1).io.m_axis.tvalid
+      layer1(2*x).io.m_axis.tready := l.io.s_axis.tready
+      layer1(2*x+1).io.m_axis.tready := l.io.s_axis.tready
+    }
+  }
+  val layer3 = Seq.fill(2)(Module(new axis_reg_slice(4, "flow_control_reg")))
+  layer3.zipWithIndex.map{
+    case(l, x) => {
+      l.io.aclk := clock.asBool()
+      l.io.aresetn := ~reset.asBool()
+      l.io.s_axis.tdata := Mux(layer2(2*x).io.m_axis.tdata > layer2(2*x+1).io.m_axis.tdata,
+        layer2(2*x).io.m_axis.tdata, layer2(2*x+1).io.m_axis.tdata)
+      l.io.s_axis.tvalid := layer2(2*x).io.m_axis.tvalid & layer2(2*x+1).io.m_axis.tvalid
+      layer2(2*x).io.m_axis.tready := l.io.s_axis.tready
+      layer2(2*x+1).io.m_axis.tready := l.io.s_axis.tready
+    }
+  }
+  val max_a = Mux(layer3(0).io.m_axis.tdata > layer3(1).io.m_axis.tdata,
+    layer3(0).io.m_axis.tdata, layer3(1).io.m_axis.tdata)
 
   val pending_options = (VecInit.tabulate(FPGA_Num)(
     x => {
@@ -221,8 +252,17 @@ class flow_control(FPGA_Num: Int) extends Module{
       }
     }
   ))
-  io.pending.bits := pending_options(FPGA_Num.U - io.idol_fpga_num - 1.U) - io.parameter
-  io.pending.valid := timing === (io.period - 1.U) && io.handshake && io.handshake_last
+  val pending_out = Module(new axis_reg_slice(4, "flow_control_reg"))
+  pending_out.io.aclk := clock.asBool()
+  pending_out.io.aresetn := ~reset.asBool()
+  pending_out.io.s_axis.tdata := pending_options(FPGA_Num.U - io.idol_fpga_num - 1.U) - io.parameter
+  pending_out.io.s_axis.tvalid := layer3(0).io.m_axis.tvalid & layer3(1).io.m_axis.tvalid
+  layer3(0).io.m_axis.tready := pending_out.io.s_axis.tready
+  layer3(1).io.m_axis.tready := pending_out.io.s_axis.tready
+
+  io.pending.bits := pending_out.io.m_axis.tdata
+  io.pending.valid := pending_out.io.m_axis.tvalid & pending_out.io.m_axis.tready
+  pending_out.io.m_axis.tready := io.handshake && io.handshake_last
 }
 
 class Remote_Apply(AXIS_DATA_WIDTH: Int, Local_Scatter_Num: Int, FPGA_Num: Int, Remote_ID : Int) extends Module {
