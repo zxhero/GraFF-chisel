@@ -387,7 +387,10 @@ class readEdge_engine(AXI_ADDR_WIDTH : Int = 64, AXI_DATA_WIDTH: Int, AXI_ID_WID
     //val read_edge_num = Output(UInt(32.W))
     val read_edge_fifo_empty = Output(Bool())
     val credit = Output(UInt(8.W))
-    val credit_dec = Input(Bool())
+    val credit_req = Flipped(ValidIO(new Bundle(){
+      val arid = UInt(AXI_ID_WIDTH.W)
+      val vid = UInt(32.W)
+    }))
     val traveled_edges = Output(UInt(64.W))
     val signal = Input(Bool())
     //val inflight_vtxs = Input(UInt(64.W))
@@ -425,7 +428,6 @@ class readEdge_engine(AXI_ADDR_WIDTH : Int = 64, AXI_DATA_WIDTH: Int, AXI_ID_WID
     val remainingBurst_edge   = Value(0x2.U)
   }
   val status = RegInit(sm.firstBurst)
-  val num = RegInit(0.U(32.W))
   when(status === sm.firstBurst && io.in.valid && io.in.ready){
     when(io.in.bits.rlast.asBool()){
       status := sm.firstBurst
@@ -448,7 +450,14 @@ class readEdge_engine(AXI_ADDR_WIDTH : Int = 64, AXI_DATA_WIDTH: Int, AXI_ID_WID
   io.traveled_edges := traveled_edges_reg
 
   //convert axi read channel to axis
+  val rid2vid = Module(new regFile(32, 32))
+  rid2vid.io.rptr := get_ptr(io.in.bits.rid)
+  rid2vid.io.wptr := get_ptr(io.credit_req.bits.arid)
+  rid2vid.io.writeFlag := io.credit_req.valid
+  rid2vid.io.dataIn := io.credit_req.bits.vid
+
   val num_regfile = Module(new regFile(32, 64))
+  val num = RegInit(0.U(32.W))
   when(status === sm.firstBurst
     && io.in.valid && io.in.ready && !io.in.bits.rlast.asBool()){
     when(get_flag(io.in.bits.rid)){
@@ -490,6 +499,9 @@ class readEdge_engine(AXI_ADDR_WIDTH : Int = 64, AXI_DATA_WIDTH: Int, AXI_ID_WID
   }
   io.xbar_out.valid := io.in.valid && io.in.ready
   io.xbar_out.bits.tdata := io.in.bits.rdata
+  when(status === sm.firstBurst && !get_flag(io.in.bits.rid)){
+    io.xbar_out.bits.tdata := Cat(io.in.bits.rdata(AXI_DATA_WIDTH*8-1, 32), rid2vid.io.dataOut)
+  }
   io.xbar_out.bits.tlast := io.in.bits.rlast
   io.xbar_out.bits.tkeep := keep.asUInt()
 
@@ -691,7 +703,7 @@ class readEdge_engine(AXI_ADDR_WIDTH : Int = 64, AXI_DATA_WIDTH: Int, AXI_ID_WID
 
   val credit_dec = io.out.ready && io.out.valid && cache_status === cache_sm.expand_new_request |
     io.out.ready && io.out.valid && cache_status === cache_sm.expand_old_request |
-    io.credit_dec
+    io.credit_req.valid
   when(credit_dec && cache_status =/= cache_sm.release_credit &&
     cache_status =/= cache_sm.rm_request){
     credit := credit - 1.U
@@ -770,7 +782,9 @@ class Broadcast(AXI_ADDR_WIDTH : Int = 64, AXI_DATA_WIDTH: Int, AXI_ID_WIDTH: In
   arbi.io.in(1).bits.arid :=  Cat(0.U(1.W), vertex_read_id)
   vertex_read_buffer.io.rd_en := (arbi.io.in(1).ready && edge_cache.io.credit =/= 0.U) | upward_status === upward_sm.output_fin
   arbi.io.in(0) <> edge_cache.io.out
-  edge_cache.io.credit_dec := arbi.io.in(1).valid && arbi.io.in(1).ready
+  edge_cache.io.credit_req.valid := arbi.io.in(1).valid && arbi.io.in(1).ready
+  edge_cache.io.credit_req.bits.vid := vertex_read_buffer.io.dout
+  edge_cache.io.credit_req.bits.arid := arbi.io.in(1).bits.arid
 
   val (ar_ready_counter, ar_b_1) = Counter(io.ddr_r.valid === false.B,
     0xffffffff)
@@ -841,6 +855,51 @@ class Broadcast(AXI_ADDR_WIDTH : Int = 64, AXI_DATA_WIDTH: Int, AXI_ID_WIDTH: In
   }
 }
 
+class fat_vertex_cache(AXIS_DATA_WIDTH: Int) extends Module {
+  val io = IO(new Bundle() {
+    val xbar_in = Flipped(Decoupled(new axisdata(AXIS_DATA_WIDTH, 4)))
+    val ddr_out = Decoupled(new axisdata(AXIS_DATA_WIDTH, 4))
+  })
+
+  val filter = Seq.fill(5)(Module(new axis_user_reg_slice(AXIS_DATA_WIDTH, 4,
+    "fat_vertex_cache_reg_slice")))
+  val fat_vertex_entry = (Seq.fill(4)(RegInit(0.U.asTypeOf(ValidIO(UInt(64.W))))))
+  filter(0).io.s_axis.connectfrom(io.xbar_in.bits)
+  filter(0).io.s_axis.tuser := VecInit.tabulate(4)(x => io.xbar_in.bits.tkeep(4*x+2, 4*x) === 4.U).asUInt()
+  io.xbar_in.ready := filter(0).io.s_axis.tready
+  filter(0).io.s_axis.tvalid := io.xbar_in.valid
+  filter(0).io.aclk := clock.asBool()
+  filter(0).io.aresetn := ~reset.asBool()
+  filter.tail.zipWithIndex.map{
+    case (f, i) => {
+      f.io.aclk := clock.asBool()
+      f.io.aresetn := ~reset.asBool()
+      f.io.s_axis <> filter(i).io.m_axis
+      when(fat_vertex_entry(i).valid){
+        f.io.s_axis.tkeep := VecInit.tabulate(AXIS_DATA_WIDTH / 4)(
+          x => {
+            filter(i).io.m_axis.tkeep(x) &&
+              fat_vertex_entry(i).bits(31, 0) =/= filter(i).io.m_axis.tdata(32*x+31, 32*x)
+          }
+        ).asUInt()
+      }
+    }
+  }
+  filter(4).io.m_axis.connectto(io.ddr_out.bits, 0)
+  filter(4).io.m_axis.tready := io.ddr_out.ready
+  io.ddr_out.valid := filter(4).io.m_axis.tvalid
+
+  fat_vertex_entry.zipWithIndex.map{
+    case (e, i) => {
+      when(filter(4).io.m_axis.tvalid.asBool() && filter(4).io.m_axis.tready.asBool() &&
+        filter(4).io.m_axis.tuser(i) === 1.U &&
+        filter(4).io.m_axis.tdata(128*i+63, 128*i+32) > e.bits(63,32)){
+        e.bits := filter(4).io.m_axis.tdata(128*i+63, 128*i)
+        e.valid := true.B
+      }
+    }
+  }
+}
 /*
 * PE ID is global addressable
 * MC ID is local addressable
@@ -874,10 +933,18 @@ class broadcast_xbar(AXIS_DATA_WIDTH: Int, SLAVE_NUM: Int, MASTER_NUM: Int) exte
     buffer0.io.s_axis_aclk := clock.asBool()
     buffer0.io.s_axis_aresetn := ~reset.asBool()
     buffer0.io.s_axis <> combiner.io.m_axis
-    xbar.io.s_axis.tdata := buffer0.io.m_axis.tdata
-    xbar.io.s_axis.tvalid := buffer0.io.m_axis.tvalid
-    xbar.io.s_axis.tkeep := VecInit(buffer0.io.m_axis.tkeep.asBools().map{x => x & buffer0.io.m_axis.tvalid}).asUInt()
-    buffer0.io.m_axis.tready := xbar.io.s_axis.tready
+
+    val fat_vertex_filter = Module(new fat_vertex_cache(AXIS_DATA_WIDTH * MASTER_NUM))
+    fat_vertex_filter.io.xbar_in.bits.tdata := buffer0.io.m_axis.tdata
+    fat_vertex_filter.io.xbar_in.bits.tkeep :=
+      VecInit(buffer0.io.m_axis.tkeep.asBools().map{x => x & buffer0.io.m_axis.tvalid}).asUInt()
+    fat_vertex_filter.io.xbar_in.valid := buffer0.io.m_axis.tvalid
+    fat_vertex_filter.io.xbar_in.bits.tlast := buffer0.io.m_axis.tlast
+    buffer0.io.m_axis.tready := fat_vertex_filter.io.xbar_in.ready
+
+    xbar.io.s_axis.connectfrom(fat_vertex_filter.io.ddr_out.bits)
+    xbar.io.s_axis.tvalid := fat_vertex_filter.io.ddr_out.valid
+    fat_vertex_filter.io.ddr_out.ready := xbar.io.s_axis.tready
   }
 
   xbar.io.aclk := clock.asBool()

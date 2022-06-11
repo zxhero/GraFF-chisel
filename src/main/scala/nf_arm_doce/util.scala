@@ -418,6 +418,18 @@ class axis_reg_slice(AXIS_DATA_WIDTH: Int, val mname : String) extends BlackBox{
   override def desiredName = mname
 }
 
+class axis_user_reg_slice(AXIS_DATA_WIDTH: Int, AXIS_USER_WIDTH: Int, val mname : String) extends BlackBox{
+  val io = IO(new Bundle() {
+    val aclk = Input(Bool())
+    val aresetn = Input(Bool())
+    val s_axis = new streamdata_user_blackbox(AXIS_DATA_WIDTH, 1, 1, AXIS_USER_WIDTH)
+    val m_axis = Flipped(new streamdata_user_blackbox(AXIS_DATA_WIDTH, 1, 1, AXIS_USER_WIDTH))
+
+  })
+
+  override def desiredName = mname
+}
+
 class sample_max(MaxValue : Int) extends Module{
   val io = IO(new Bundle() {
     val enable = Input(Bool())
