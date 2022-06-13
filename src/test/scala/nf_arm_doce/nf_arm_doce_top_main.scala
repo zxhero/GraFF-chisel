@@ -3,7 +3,7 @@ package nf_arm_doce
 import chisel3._
 import numa.V2LLayer
 import bfs._
-import chisel3.util.Cat
+import chisel3.util.{Cat, Counter}
 import doce.{aw_decode, aw_width_converter, rx_depacketing, tx_packeting}
 import remote._
 
@@ -41,6 +41,10 @@ class BFS_ps(AXI_ADDR_WIDTH : Int = 64, AXI_DATA_WIDTH: Int = 64, AXI_ID_WIDTH: 
       14, 4, i, 1))
   )
   val Broadcaster = Module(new broadcast_xbar(16, 16, 4))
+
+  val (ar_ready_counter1, ar_b_1) = Counter(io.PSmemory(0).r.valid.asBool() === false.B &&
+    LevelCache.io.gather_in.valid === true.B && LevelCache.io.gather_in.ready === false.B,0x7fffffff)
+  dontTouch(ar_ready_counter1)
 
   io.PLmemory <> MemController.io.ddr_out
   Gathers.io.ddr_in <> MemController.io.cacheable_out

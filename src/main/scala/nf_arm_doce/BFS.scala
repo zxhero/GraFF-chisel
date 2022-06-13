@@ -186,6 +186,12 @@ class Apply(AXI_ADDR_WIDTH : Int = 64, AXI_DATA_WIDTH: Int = 64, AXI_ID_WIDTH: I
     val flush = Input(Bool())
   })
 
+  val ready_counter = RegInit(0.U(32.W))
+  dontTouch(ready_counter)
+  when(io.gather_in.ready === false.B && io.gather_in.valid === true.B){
+    ready_counter := ready_counter + 1.U
+  }
+
   def v2LevelCacheAddr(vid : UInt, x : Int) : Bool = {
     vid(31) === 0.U && vid(log2Ceil(FPGA_Num) + 1, log2Ceil(FPGA_Num)) === x.U
   }
@@ -312,6 +318,13 @@ class Gather(AXI_DATA_WIDTH: Int = 64, Broadcast_Num: Int) extends Module{
     val gather_out = Vec(Broadcast_Num, Decoupled(new axisdata(4, 4)))
     val level_cache_out = Decoupled(new axisdata(AXI_DATA_WIDTH, 4))
   })
+
+  val ready_counter = RegInit(0.U(32.W))
+  dontTouch(ready_counter)
+  when(io.ddr_in.ready === false.B && io.ddr_in.valid === true.B){
+    ready_counter := ready_counter + 1.U
+  }
+
   val broadcaster = Module(new axis_broadcaster(AXI_DATA_WIDTH, (1 + Broadcast_Num), "gather_broadcaster"))
   broadcaster.io.s_axis.connectfrom(io.ddr_in.bits)
   broadcaster.io.s_axis.tvalid := io.ddr_in.valid
@@ -786,9 +799,12 @@ class Broadcast(AXI_ADDR_WIDTH : Int = 64, AXI_DATA_WIDTH: Int, AXI_ID_WIDTH: In
   edge_cache.io.credit_req.bits.vid := vertex_read_buffer.io.dout
   edge_cache.io.credit_req.bits.arid := arbi.io.in(1).bits.arid
 
-  val (ar_ready_counter, ar_b_1) = Counter(io.ddr_r.valid === false.B,
-    0xffffffff)
+  val (ar_ready_counter, ar_b_1) = Counter(io.ddr_r.valid === false.B && upward_status =/= upward_sm.idole,
+    0x7fffffff)
   dontTouch(ar_ready_counter)
+  val (ar_ready_counter_2, ar_b_2) = Counter(io.ddr_r.valid === true.B && upward_status =/= upward_sm.idole,
+    0x7fffffff)
+  dontTouch(ar_ready_counter_2)
 
   //back end of down ward
   val KEEP_WIDTH = AXI_DATA_WIDTH / 4
@@ -842,7 +858,7 @@ class Broadcast(AXI_ADDR_WIDTH : Int = 64, AXI_DATA_WIDTH: Int, AXI_ID_WIDTH: In
     upward_status := upward_sm.idole
   }
 
-  val (ready_counter, b) = Counter(upward_status === upward_sm.sync, 0x10000000)
+  val (ready_counter, b) = Counter(io.xbar_out.valid === true.B && io.xbar_out.ready === false.B, 0x10000000)
   dontTouch(ready_counter)
 
   when(io.ddr_ar.valid && io.ddr_ar.ready
@@ -1084,12 +1100,6 @@ class Scatter(AXIS_DATA_WIDTH: Int = 4, SID: Int, AXI_DATA_WIDTH: Int,
 
   //control path
   io.end := vertex_out_fifo.io.m_axis.tvalid & vertex_out_fifo.io.m_axis.tdata(31) === 1.U
-
-  val ready_counter = RegInit(0.U(32.W))
-  dontTouch(ready_counter)
-  when(io.xbar_in.ready === false.B && io.xbar_in.valid === true.B){
-    ready_counter := ready_counter + 1.U
-  }
 }
 
 //TODO: Try to use fifoIO
