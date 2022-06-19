@@ -35,7 +35,7 @@ class BFS_ps(AXI_ADDR_WIDTH : Int = 64, AXI_DATA_WIDTH: Int = 64, AXI_ID_WIDTH: 
     i => Module(new Scatter(4, i, 64, 1, 16))
   )
   val Gathers = Module(new Gather(64, 4))
-  val LevelCache = Module(new Apply(AXI_ADDR_WIDTH, AXI_DATA_WIDTH, AXI_ID_WIDTH + 1, AXI_SIZE_WIDTH, 1))
+  val LevelCache = Module(new Apply(AXI_ADDR_WIDTH, AXI_DATA_WIDTH, AXI_ID_WIDTH, AXI_SIZE_WIDTH, 1))
   val Scatters = Seq.tabulate(4)(
     i => Module(new Broadcast(64, 16, 6, 3,
       14, 4, i, 1))
@@ -46,12 +46,54 @@ class BFS_ps(AXI_ADDR_WIDTH : Int = 64, AXI_DATA_WIDTH: Int = 64, AXI_ID_WIDTH: 
     LevelCache.io.gather_in.valid === true.B && LevelCache.io.gather_in.ready === false.B,0x7fffffff)
   dontTouch(ar_ready_counter1)
 
+  val axi_ready_counter = RegInit(VecInit(Seq.fill(4)(0.U(32.W))))
+  dontTouch(axi_ready_counter)
+  axi_ready_counter.zipWithIndex.map{
+    case (x, i) => {
+     when(io.PSmemory(i).w.valid === false.B && io.PSmemory(i).r.valid === false.B &&
+       io.PSmemory(i).ar.valid === false.B && io.PSmemory(i).aw.valid === false.B &&
+       Gathers.io.ddr_in.valid === true.B){
+       x := x + 1.U
+     }
+    }
+  }
+  val axi_all_ready_counter = RegInit(0.U(32.W))
+  dontTouch(axi_all_ready_counter)
+  when(io.PSmemory(0).w.valid === false.B && io.PSmemory(0).r.valid === false.B &&
+    io.PSmemory(0).ar.valid === false.B && io.PSmemory(0).aw.valid === false.B &&
+    io.PSmemory(1).w.valid === false.B && io.PSmemory(1).r.valid === false.B &&
+    io.PSmemory(1).ar.valid === false.B && io.PSmemory(1).aw.valid === false.B &&
+    io.PSmemory(2).w.valid === false.B && io.PSmemory(2).r.valid === false.B &&
+    io.PSmemory(2).ar.valid === false.B && io.PSmemory(2).aw.valid === false.B &&
+    io.PSmemory(3).w.valid === false.B && io.PSmemory(3).r.valid === false.B &&
+    io.PSmemory(3).ar.valid === false.B && io.PSmemory(3).aw.valid === false.B &&
+    Gathers.io.ddr_in.valid === true.B){
+    axi_all_ready_counter := axi_all_ready_counter + 1.U
+  }
+  val axi_r_all_ready_counter = RegInit(0.U(32.W))
+  dontTouch(axi_r_all_ready_counter)
+  when(io.PSmemory(0).r.valid === false.B &&
+    io.PSmemory(0).ar.valid === false.B &&
+    io.PSmemory(1).r.valid === false.B &&
+    io.PSmemory(1).ar.valid === false.B &&
+     io.PSmemory(2).r.valid === false.B &&
+    io.PSmemory(2).ar.valid === false.B &&
+    io.PSmemory(3).r.valid === false.B &&
+    io.PSmemory(3).ar.valid === false.B &&
+    Gathers.io.ddr_in.valid === true.B){
+    axi_r_all_ready_counter := axi_r_all_ready_counter + 1.U
+  }
+
   io.PLmemory <> MemController.io.ddr_out
   Gathers.io.ddr_in <> MemController.io.cacheable_out
   LevelCache.io.gather_in <> Gathers.io.level_cache_out
-  LevelCache.io.ddr_w <> MemController.io.non_cacheable_in.w
-  LevelCache.io.ddr_aw <> MemController.io.non_cacheable_in.aw
-  LevelCache.io.ddr_b <> MemController.io.non_cacheable_in.b
+  LevelCache.io.axi.zipWithIndex.map{
+    case (x, i) => {
+      x.ddr_aw <> io.PSmemory(i).aw
+      x.ddr_b <> io.PSmemory(i).b
+      x.ddr_w <> io.PSmemory(i).w
+    }
+  }
   Scatters.zipWithIndex.map{
     case (b, i) => {
       b.io.gather_in <> Gathers.io.gather_out(i)
@@ -86,15 +128,11 @@ class BFS_ps(AXI_ADDR_WIDTH : Int = 64, AXI_DATA_WIDTH: Int = 64, AXI_ID_WIDTH: 
   io.Re_memory_out.b.ready := true.B
 
   //tie off unnecessary ports
-  io.PSmemory.map{
-    i => {
-      i.b.ready := false.B
-      i.aw.bits.tie_off(0.U)
-      i.aw.valid := false.B
-      i.w.bits.tie_off()
-      i.w.valid := false.B
-    }
-  }
+  MemController.io.non_cacheable_in.b.ready := false.B
+  MemController.io.non_cacheable_in.aw.bits.tie_off(0.U)
+  MemController.io.non_cacheable_in.aw.valid := false.B
+  MemController.io.non_cacheable_in.w.bits.tie_off()
+  MemController.io.non_cacheable_in.w.valid := false.B
   MemController.io.non_cacheable_in.r.ready := false.B
   MemController.io.non_cacheable_in.ar.bits.tie_off((1.U << AXI_ID_WIDTH).asUInt())
   MemController.io.non_cacheable_in.ar.valid := false.B
