@@ -287,9 +287,17 @@ class Remote_Apply(AXIS_DATA_WIDTH: Int, Local_Scatter_Num: Int, FPGA_Num: Int, 
 
   val level = RegInit(0.U(32.W))
   level := io.level
+  val local_fpga_id = RegInit(0.U(log2Ceil(FPGA_Num).W))
+  local_fpga_id := io.local_fpga_id
+  val packet_size = RegInit(0.U(32.W))
+  packet_size := io.packet_size
+  val pending_period = RegInit(0.U(32.W))
+  pending_period := io.pending_time
+  val pending_parameter = RegInit(0.U(32.W))
+  pending_parameter := io.pending_parameter
 
   def vid_to_remote(vid: UInt) : Bool = {
-    vid(log2Ceil(FPGA_Num) - 1, 0) === Remote_ID.U && vid(log2Ceil(FPGA_Num) - 1, 0) =/= io.local_fpga_id
+    vid(log2Ceil(FPGA_Num) - 1, 0) === Remote_ID.U && vid(log2Ceil(FPGA_Num) - 1, 0) =/= local_fpga_id
   }
 
   val filtered_keep = Wire(Vec(AXIS_DATA_WIDTH / 4, Bool()))
@@ -330,7 +338,7 @@ class Remote_Apply(AXIS_DATA_WIDTH: Int, Local_Scatter_Num: Int, FPGA_Num: Int, 
   }
   val sync_data = Wire(new sync_msg(FPGA_Num))
   sync_data.flag := (true.B)
-  sync_data.id := io.local_fpga_id
+  sync_data.id := local_fpga_id
   sync_data.level := level
   sync_data.reserved := 0.U
   sync_data.size := io.local_unvisited_size(23, 0)
@@ -342,7 +350,7 @@ class Remote_Apply(AXIS_DATA_WIDTH: Int, Local_Scatter_Num: Int, FPGA_Num: Int, 
   }.otherwise{
     stall_time := 0.U
   }
-  when(sync_status === sm.idole && io.recv_sync.andR() && io.local_fpga_id =/= Remote_ID.U) {
+  when(sync_status === sm.idole && io.recv_sync.andR() && local_fpga_id =/= Remote_ID.U) {
     sync_status := sm.flush
   }.elsewhen(sync_status === sm.flush && collector.io.empty){
     sync_status := sm.output_fin_phase1
@@ -378,13 +386,13 @@ class Remote_Apply(AXIS_DATA_WIDTH: Int, Local_Scatter_Num: Int, FPGA_Num: Int, 
   io.remote_out.bits.tkeep := vertex_in_fifo.io.m_axis.tkeep
   io.remote_out.bits.tdata := vertex_in_fifo.io.m_axis.tdata
   io.remote_out.bits.tuser := Remote_ID.U
-  io.remote_out.bits.tlast := send_count === (io.packet_size - 1.U) | vertex_in_fifo_data_count === 1.U
+  io.remote_out.bits.tlast := send_count === (packet_size - 1.U) | vertex_in_fifo_data_count === 1.U
   flow_control_unit.io.data := vertex_in_fifo.io.m_axis.tdata
   flow_control_unit.io.keep := vertex_in_fifo.io.m_axis.tkeep
   flow_control_unit.io.handshake := io.remote_out.valid && io.remote_out.ready
   flow_control_unit.io.handshake_last := io.remote_out.bits.tlast
-  flow_control_unit.io.period := io.pending_time
-  flow_control_unit.io.parameter := io.pending_parameter
+  flow_control_unit.io.period := pending_period
+  flow_control_unit.io.parameter := pending_parameter
   flow_control_unit.io.idol_fpga_num := io.idol_fpga_num
   when(flow_control_unit.io.pending.valid){
     extra_time := 0.U
@@ -400,13 +408,13 @@ class Remote_Apply(AXIS_DATA_WIDTH: Int, Local_Scatter_Num: Int, FPGA_Num: Int, 
     pending_time := pending_time - 1.U
   }
   when(io.remote_out.valid && io.remote_out.ready){
-    when(send_count === (io.packet_size - 1.U)){
+    when(send_count === (packet_size - 1.U)){
       send_count := 0.U
     }.otherwise{
       send_count := send_count + 1.U
     }
   }
-  when(vertex_in_fifo_data_count >= io.packet_size && send_count === 0.U
+  when(vertex_in_fifo_data_count >= packet_size && send_count === 0.U
   || (send_count =/= 0.U)
   || (sync_status =/= sm.idole)){
     when(pending_time === 0.U){
@@ -424,7 +432,11 @@ class axis_to_axi(AXI_ADDR_WIDTH : Int = 64, AXI_DATA_WIDTH: Int, AXI_ID_WIDTH: 
     val remote_out = Flipped(new axidata(AXI_ADDR_WIDTH, AXI_DATA_WIDTH, AXI_ID_WIDTH, AXI_SIZE_WIDTH))
 
     val level_base_addr = Vec(Master_Num, Input(UInt(64.W)))
+    val net_constrain = Input(UInt(32.W))
   })
+
+  val net_constrain = RegInit(0.U(32.W))
+  net_constrain := io.net_constrain
 
   assert(AXI_DATA_WIDTH == AXIS_DATA_WIDTH)
 
@@ -457,7 +469,14 @@ class axis_to_axi(AXI_ADDR_WIDTH : Int = 64, AXI_DATA_WIDTH: Int, AXI_ID_WIDTH: 
   val send_status = RegInit(sm.idole)
   val addr_issue = io.remote_out.aw.valid && io.remote_out.aw.ready
   val data_issue = io.remote_out.w.valid && io.remote_out.w.ready && io.remote_out.w.bits.wlast.asBool()
-  when(send_status === sm.idole && vertex_in_fifo.io.m_axis.tvalid.asBool()){
+  val BW_net_constrain = RegInit(0.U)
+  val ready_to_issue = send_status === sm.idole && vertex_in_fifo.io.m_axis.tvalid.asBool() && BW_net_constrain === 0.U
+  when(ready_to_issue){
+    BW_net_constrain := net_constrain - 1.U
+  }.elsewhen(BW_net_constrain =/= 0.U){
+    BW_net_constrain := BW_net_constrain - 1.U
+  }
+  when(ready_to_issue){
     send_status := sm.sending
   }.elsewhen((send_status === sm.sending && addr_issue && data_issue)
     || (send_status === sm.wait_aw && addr_issue)
@@ -519,6 +538,9 @@ class Remote_Scatter(AXI_ADDR_WIDTH : Int = 64, AXI_DATA_WIDTH: Int, AXI_ID_WIDT
     val idol_fpga_num = Output(UInt(log2Ceil(FPGA_Num).W))
   })
 
+  val local_fpga_id = RegInit(0.U(log2Ceil(FPGA_Num).W))
+  local_fpga_id := io.local_fpga_id
+
   //tie off not used channel
   io.remote_in.ar.ready := false.B
   io.remote_in.aw.ready := true.B
@@ -539,11 +561,11 @@ class Remote_Scatter(AXI_ADDR_WIDTH : Int = 64, AXI_DATA_WIDTH: Int, AXI_ID_WIDT
     vertex_in_fifo.io.m_axis.tkeep(0) === 1.U && !io.issue_sync
   syncs.zipWithIndex.map{
     case(sync, i) => {
-      when(io.local_fpga_id === i.U && io.start){
+      when(local_fpga_id === i.U && io.start){
         sync := 2.U
       }.elsewhen(is_sync && sync_data.id === i.U){
         sync := sync + 1.U
-      }.elsewhen(!io.start && io.signal && io.local_fpga_id =/= i.U){
+      }.elsewhen(!io.start && io.signal && local_fpga_id =/= i.U){
         sync := 0.U
       }
     }
@@ -600,6 +622,9 @@ class Remote_xbar(AXIS_DATA_WIDTH: Int, SLAVE_NUM: Int, MASTER_NUM: Int, FPGA_Nu
 
   assert(AXIS_DATA_WIDTH * MASTER_NUM == 64)
 
+  val local_fpga_id = RegInit(0.U(log2Ceil(FPGA_Num).W))
+  local_fpga_id := io.local_fpga_id
+
   val combiner_level0 = Module(new axis_combiner(AXIS_DATA_WIDTH, MASTER_NUM, "axis_combiner_level0"))
   combiner_level0.io.aclk := clock.asBool()
   combiner_level0.io.aresetn := ~reset.asBool()
@@ -636,7 +661,7 @@ class Remote_xbar(AXIS_DATA_WIDTH: Int, SLAVE_NUM: Int, MASTER_NUM: Int, FPGA_Nu
   }
 
   def vid_to_local(vid: UInt) : Bool = {
-    vid(log2Ceil(FPGA_Num) - 1, 0) === io.local_fpga_id
+    vid(log2Ceil(FPGA_Num) - 1, 0) === local_fpga_id
   }
 
   val filtered_keep = Wire(Vec(64 / 4, Bool()))
