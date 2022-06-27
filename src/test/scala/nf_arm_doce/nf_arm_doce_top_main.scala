@@ -32,7 +32,8 @@ class BFS_ps(AXI_ADDR_WIDTH : Int = 64, AXI_DATA_WIDTH: Int = 64, AXI_ID_WIDTH: 
       "Rlevel_lo_1" -> 19, "Rlevel_hi_1" -> 20,
       "Rlevel_lo_2" -> 21, "Rlevel_hi_2" -> 22,
       "Rlevel_lo_3" -> 23, "Rlevel_hi_3" -> 24,
-      "packet_size" -> 25, "pending_time" -> 26)))
+      "packet_size" -> 25, "pending_time" -> 26,
+      "net_constrain" -> 27)))
 
   val MemController = Module(new multi_port_mc(AXI_ADDR_WIDTH, AXI_DATA_WIDTH, AXI_ID_WIDTH + 1,
     AXI_SIZE_WIDTH, 16))
@@ -153,6 +154,7 @@ class BFS_ps(AXI_ADDR_WIDTH : Int = 64, AXI_DATA_WIDTH: Int = 64, AXI_ID_WIDTH: 
     x => Cat(controls.GetRegByName("Rlevel_hi_"+x.toString),
       controls.GetRegByName("Rlevel_lo_"+x.toString))
   ))
+  ReSwitch.io.net_constrain := controls.GetRegByName("net_constrain")
   Broadcaster.io.local_fpga_id := controls.GetRegByName("fpga_id")
   Broadcaster.io.flush := Scatters.map{i => i.io.issue_sync}.reduce(_&_)
   Broadcaster.io.signal := controls.io.signal && controls.io.signal_ack
