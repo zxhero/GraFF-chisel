@@ -55,6 +55,18 @@ class BFS_ps(AXI_ADDR_WIDTH : Int = 64, AXI_DATA_WIDTH: Int = 64, AXI_ID_WIDTH: 
   val ReSwitch = Module(new axis_to_axi(64, 64, 6, 3,
     64, 4))
 
+  val max_size_to_net = RegInit(0.U(32.W))
+  dontTouch(max_size_to_net)
+  val size_to_net = RegInit(0.U(32.W))
+  when(io.Re_memory_out.w.valid.asBool() && io.Re_memory_out.w.ready.asBool()){
+    size_to_net := size_to_net + AXI_DATA_WIDTH.U
+  }.elsewhen(controls.io.signal){
+    size_to_net := 0.U
+    when(size_to_net > max_size_to_net){
+      max_size_to_net := size_to_net
+    }
+  }
+
   io.PLmemory <> MemController.io.ddr_out
   Gathers.io.ddr_in <> MemController.io.cacheable_out
   LevelCache.io.gather_in <> Gathers.io.level_cache_out
