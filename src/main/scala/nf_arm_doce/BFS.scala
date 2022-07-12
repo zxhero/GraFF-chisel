@@ -186,124 +186,14 @@ class Apply(AXI_ADDR_WIDTH : Int = 64, AXI_DATA_WIDTH: Int = 64, AXI_ID_WIDTH: I
     val flush = Input(Bool())
   })
 
-  def v2LevelCacheAddr(vid : UInt, x : Int) : Bool = {
-    vid(31) === 0.U && vid(log2Ceil(FPGA_Num) + 1, log2Ceil(FPGA_Num)) === x.U
-  }
-
-  val apply_in = Module(new axis_reg_slice(AXI_DATA_WIDTH, "v2A_reg_slice"))
-  apply_in.io.aclk := clock.asBool()
-  apply_in.io.aresetn := ~reset.asBool()
-  apply_in.io.s_axis.connectfrom(io.gather_in.bits)
-  apply_in.io.s_axis.tvalid := io.gather_in.valid
-  io.gather_in.ready := apply_in.io.s_axis.tready
-
-  val broadcaster = Module(new axis_broadcaster(AXI_DATA_WIDTH, 4, "level_cache_broadcaster"))
-  broadcaster.io.aresetn := ~reset.asBool()
-  broadcaster.io.aclk := clock.asBool()
-  broadcaster.io.s_axis.tvalid := apply_in.io.m_axis.tvalid
-  broadcaster.io.s_axis.tkeep := apply_in.io.m_axis.tkeep
-  broadcaster.io.s_axis.tdata := apply_in.io.m_axis.tdata
-  broadcaster.io.s_axis.tlast := apply_in.io.m_axis.tlast
-  apply_in.io.m_axis.tready := broadcaster.io.s_axis.tready
-
-  val apply_selecter = Seq.fill(4)(
-    Module(new axis_arbitrator(4, AXI_DATA_WIDTH / 4, 4))
-  )
-  val vertex_update_buffer = Seq.fill(4)(
-    Module(new BRAM_fifo(32, 64, "update_fifo"))
-  )
-  val update_engine = Seq.tabulate(4)(
-    x => Module(new WB_engine(AXI_ADDR_WIDTH, AXI_DATA_WIDTH, AXI_ID_WIDTH, AXI_DATA_WIDTH, FPGA_Num, x))
-  )
-  val end_reg = RegInit(VecInit(Seq.fill(4)(false.B)))
-  val ddr_arbi = Module(new RRArbiter(new Bundle(){
-    val wb_block_index = UInt(12.W)
-    val buffer_doutb = UInt(48.W)
-  }, 4))
-  Seq.tabulate(4){
-    x => {
-      apply_selecter(x).io.xbar_in.valid := broadcaster.io.m_axis.tvalid(x) &
-        apply_selecter(x).io.xbar_in.bits.tkeep =/= 0.U
-      apply_selecter(x).io.xbar_in.bits.tlast := broadcaster.io.m_axis.tlast(x)
-      apply_selecter(x).io.xbar_in.bits.tdata :=
-        broadcaster.io.m_axis.tdata(AXI_DATA_WIDTH * 8 * (x + 1) - 1, AXI_DATA_WIDTH * 8 * x)
-      apply_selecter(x).io.xbar_in.bits.tkeep := VecInit.tabulate(16)(
-        k => {
-          broadcaster.io.m_axis.tkeep(AXI_DATA_WIDTH * x + k) &
-            v2LevelCacheAddr(broadcaster.io.m_axis.tdata(AXI_DATA_WIDTH * 8 * x + 32 * (k + 1) - 1,
-              AXI_DATA_WIDTH * 8 * x + 32 * k), x)
-        }
-      ).asUInt()
-
-      vertex_update_buffer(x).io.clk := clock.asBool()
-      vertex_update_buffer(x).io.srst := reset.asBool()
-      vertex_update_buffer(x).io.wr_en := apply_selecter(x).io.ddr_out.valid
-      vertex_update_buffer(x).io.din := Cat(apply_selecter(x).io.ddr_out.bits.tdata, io.level)
-      apply_selecter(x).io.ddr_out.ready := vertex_update_buffer(x).is_ready()
-
-      update_engine(x).io.xbar_in.bits.tdata := vertex_update_buffer(x).io.dout(63, 32)
-      update_engine(x).io.xbar_in.bits.tkeep := 0xf.U
-      update_engine(x).io.xbar_in.bits.tlast := true.B
-      update_engine(x).io.xbar_in.valid := vertex_update_buffer(x).is_valid()
-      update_engine(x).io.level := vertex_update_buffer(x).io.dout(31, 0)
-      update_engine(x).io.flush := io.flush & vertex_update_buffer(x).is_empty()
-      vertex_update_buffer(x).io.rd_en := update_engine(x).io.xbar_in.ready
-      when(update_engine(x).io.end){
-        end_reg(x) := true.B
-      }
-
-      ddr_arbi.io.in(x) <> update_engine(x).io.wb_data
-    }
-  }
-  broadcaster.io.m_axis.tready := VecInit(apply_selecter.map(x=>x.io.xbar_in.ready)).asUInt()
-
-  val aw_buffer = Module(new BRAM_fifo(32, AXI_ADDR_WIDTH, "addr_fifo"))
-  val w_buffer = Module(new BRAM_fifo(32, 64, "level_fifo"))
-  val level_base_addr_reg = RegInit(0.U(64.W))
-  level_base_addr_reg := io.level_base_addr
-  val w_buffer_reg_slice = Module(new axis_reg_slice(8, "w_buffer_reg_slice"))
-  w_buffer_reg_slice.io.aclk := clock.asBool()
-  w_buffer_reg_slice.io.aresetn := ~reset.asBool()
-  val aw_buffer_reg_slice = Module(new axis_reg_slice(8, "aw_buffer_reg_slice"))
-  aw_buffer_reg_slice.io.aclk := clock.asBool()
-  aw_buffer_reg_slice.io.aresetn := ~reset.asBool()
-
-  ddr_arbi.io.out.ready := w_buffer_reg_slice.io.s_axis.tready.asBool() && aw_buffer_reg_slice.io.s_axis.tready.asBool()
-  aw_buffer_reg_slice.io.s_axis.tdata := Cat(ddr_arbi.io.out.bits.wb_block_index,
-    ddr_arbi.io.out.bits.buffer_doutb(13 + 32,32)).asUInt()
-  aw_buffer_reg_slice.io.s_axis.tvalid := ddr_arbi.io.out.valid && w_buffer_reg_slice.io.s_axis.tready.asBool()
-  aw_buffer_reg_slice.io.m_axis.tready := aw_buffer.is_ready()
-  aw_buffer.io.clk := clock.asBool()
-  aw_buffer.io.srst := reset.asBool()
-  aw_buffer.io.wr_en := aw_buffer_reg_slice.io.m_axis.tvalid//wb_sm === sm.wb_level && w_buffer.io.full === false.B
-  aw_buffer.io.din := aw_buffer_reg_slice.io.m_axis.tdata + level_base_addr_reg
-  val alignment_addr = aw_buffer.io.dout(63, 6)
-  io.ddr_aw.bits.awaddr := Cat(alignment_addr, 0.U(6.W))
-  io.ddr_aw.bits.awlock := 0.U
-  io.ddr_aw.bits.awid := Cat(1.U(1.W), aw_buffer.io.data_count.asTypeOf(UInt((AXI_ID_WIDTH - 1).W)))
-  io.ddr_aw.bits.awlen := 0.U
-  io.ddr_aw.bits.awburst := 1.U(2.W)
-  io.ddr_aw.bits.awsize := 2.U
-  io.ddr_aw.valid := aw_buffer.is_valid()
-  aw_buffer.io.rd_en := io.ddr_aw.ready
-
-  w_buffer_reg_slice.io.s_axis.tdata := ddr_arbi.io.out.bits.buffer_doutb(31 + 6, 0)
-  w_buffer_reg_slice.io.s_axis.tvalid := ddr_arbi.io.out.valid && aw_buffer_reg_slice.io.s_axis.tready.asBool()
-  w_buffer_reg_slice.io.m_axis.tready := w_buffer.is_ready()
-  w_buffer.io.clk := clock.asBool()
-  w_buffer.io.srst := reset.asBool()
-  w_buffer.io.wr_en := w_buffer_reg_slice.io.m_axis.tvalid//wb_sm === sm.wb_level && aw_buffer.io.full === false.B
-  w_buffer.io.din := w_buffer_reg_slice.io.m_axis.tdata
-  val alignment_offset = w_buffer.io.dout(5 + 32, 32)
-  io.ddr_w.bits.wdata := w_buffer.io.dout(31, 0).asTypeOf(UInt(512.W)) << (8.U * alignment_offset)
-  io.ddr_w.bits.wlast := true.B
-  io.ddr_w.valid := w_buffer.is_valid()
-  io.ddr_w.bits.wstrb := 0xf.U(64.W) << alignment_offset
-  w_buffer.io.rd_en := io.ddr_w.ready
-
+  io.ddr_aw.bits.tie_off(0.U)
+  io.ddr_w.bits.tie_off()
+  io.ddr_w.valid := false.B
+  io.ddr_aw.valid := false.B
   io.ddr_b.ready := true.B
+  io.gather_in.ready := true.B
 
-  io.end := end_reg.reduce(_&_)
+  io.end := io.flush
 }
 
 class Gather(AXI_DATA_WIDTH: Int = 64, Broadcast_Num: Int) extends Module{
@@ -906,6 +796,7 @@ class Scatter(AXIS_DATA_WIDTH: Int = 4, SID: Int, AXI_DATA_WIDTH: Int,
     //control path
     val end = Output(Bool())
     val local_fpga_id = Input(UInt((log2Ceil(FPGA_Num) + 1).W))
+    val graph_scale = Input(UInt(32.W))
   })
   val vertex_num = AXI_DATA_WIDTH / 4
   val bitmap = Module(new BRAM(116 * 1024 * 16 / Apply_num, 9, "bitmap_0"))
@@ -1009,14 +900,38 @@ class Scatter(AXIS_DATA_WIDTH: Int = 4, SID: Int, AXI_DATA_WIDTH: Int,
   bitmap.io.clka := clock.asBool()
   bitmap.io.dina := bitmap_write_data.bits
   bitmap.io.addra := vid2bitmap_addr(bitmap_write_addr.bits)
-  vertex_out_fifo.io.m_axis.tready := io.ddr_out.ready //| vertex_out_fifo.test_FIN()
-  io.ddr_out.valid := vertex_out_fifo.io.m_axis.tvalid & vertex_out_fifo.io.m_axis.tdata(31) === 0.U
+  vertex_out_fifo.io.m_axis.tready := true.B
+  io.ddr_out.valid := false.B
   io.ddr_out.bits.tkeep := true.B
   io.ddr_out.bits.tlast := true.B
   io.ddr_out.bits.tdata := vertex_out_fifo.io.m_axis.tdata
 
   //control path
-  io.end := vertex_out_fifo.io.m_axis.tvalid & vertex_out_fifo.io.m_axis.tdata(31) === 1.U
+  val wb_bram = RegInit(0.U(32.W))
+
+  val aligned_graph_scale = (io.graph_scale >> 19.U).asUInt()
+
+  val num_small_sp = RegInit(0.U(32.W))
+  when(vertex_out_fifo.io.m_axis.tvalid.asBool() & vertex_out_fifo.io.m_axis.tdata(31) === 1.U){
+    num_small_sp := aligned_graph_scale +
+      (io.graph_scale > (aligned_graph_scale << 19.U).asUInt()).asUInt()
+  }.elsewhen(wb_bram > 0.U && wb_bram <= 64.U && num_small_sp =/= 0.U){
+    num_small_sp := num_small_sp - 1.U
+  }
+  val vertices_per_sp = Mux(num_small_sp === 1.U, io.graph_scale(19,0), (1<<19).U(32.W))
+  when(num_small_sp =/= 0.U && wb_bram === 0.U) {
+    when(num_small_sp === 1.U){
+      wb_bram := (vertices_per_sp << 2.U(4.W)).asUInt() + 0x4000.U(32.W) //float operations latency
+    }.elsewhen(num_small_sp === 2.U){
+      wb_bram := ((vertices_per_sp + io.graph_scale(19,0)) << 2.U(4.W)).asUInt() + 0x4000.U(32.W)
+    }.otherwise{
+      //load next small sp block.
+      wb_bram := (vertices_per_sp << 3.U(4.W)).asUInt() + 0x4000.U(32.W) //float operations latency
+    }
+  }.elsewhen(wb_bram > 0.U){
+    wb_bram := Mux(wb_bram > 64.U, wb_bram - 64.U, 0.U)
+  }
+  io.end := wb_bram > 0.U && wb_bram <= 64.U && num_small_sp === 1.U
 
   val ready_counter = RegInit(0.U(32.W))
   dontTouch(ready_counter)
@@ -1082,7 +997,7 @@ class multi_channel_fifo(AXI_DATA_WIDTH: Int = 64, size : Int, val Scatter_num :
 * FIN: vid[31] = 1
 * */
 class multi_port_mc(AXI_ADDR_WIDTH : Int = 64, AXI_DATA_WIDTH: Int = 64, AXI_ID_WIDTH: Int, AXI_SIZE_WIDTH: Int = 3,
-                    Scatter_num : Int) extends Module {
+                    Scatter_num : Int, FPGA_Num: Int) extends Module {
   val io = IO(new Bundle() {
     val cacheable_out = Decoupled(new axisdata(AXI_DATA_WIDTH, 4))
     val cacheable_in = Vec(Scatter_num, Flipped(Decoupled(new axisdata(4, 4))))
@@ -1090,7 +1005,7 @@ class multi_port_mc(AXI_ADDR_WIDTH : Int = 64, AXI_DATA_WIDTH: Int = 64, AXI_ID_
     val ddr_out = Vec(2, Flipped(new axidata(AXI_ADDR_WIDTH, AXI_DATA_WIDTH, AXI_ID_WIDTH, AXI_SIZE_WIDTH)))
 
     //control path
-    val tiers_base_addr = Vec(2, Input(UInt(AXI_ADDR_WIDTH.W)))
+    val graph_scale = Input(UInt(32.W))
     val unvisited_size = Output(UInt(32.W))
     val start = Input(Bool())
     val signal = Input(Bool())
@@ -1098,215 +1013,74 @@ class multi_port_mc(AXI_ADDR_WIDTH : Int = 64, AXI_DATA_WIDTH: Int = 64, AXI_ID_
     val signal_ack = Output(Bool())
   })
 
-  def indexAdd(index : UInt, step : UInt) : UInt = {
-    Mux(index + step >= 16.U, index + step - 16.U, index + step)
-  }
-  def indexSub(index1 : UInt, index2 : UInt) : UInt = {
-    Mux(index1 <= index2, index2 - index1, 16.U - index1 + index2)
-  }
-
-  val tier_fifo = Seq.tabulate(2)(i => Module(new multi_channel_fifo(AXI_DATA_WIDTH, 512, Scatter_num)))
-  val tier_counter = RegInit(VecInit(Seq.fill(2)(0.U(32.W))))
-
+  val tier_counter = RegInit(0.U(32.W))
+  val tier_data = RegInit(VecInit.tabulate(16)(
+    x => (x << log2Ceil(FPGA_Num)).U(32.W)
+  ))
   object sm extends ChiselEnum {
     val idole = Value(0x0.U)
-    val next_tier_is_0  = Value(0x1.U) // i "load"  -> 000_0011
-    val next_tier_is_1   = Value(0x2.U) // i "imm"   -> 001_0011
-    val writeback = Value(0x3.U)
-    val readback = Value(0x4.U)
-    //val start = Value(0x7.U)
+    val next_tier_is_0  = Value(0x1.U)
     val sync_send_0 = Value(0x5.U)
-    val sync_send_1 = Value(0x6.U)
     val signal_wait_0 = Value(0x7.U)
-    val signal_wait_1 = Value(0x8.U)
-    val writebackdata = Value(0x9.U)
-    val readbackdata = Value(0x10.U)
-    val wait_tier0_wb = Value(0x11.U)
-    val wait_tier1_wb = Value(0x12.U)
   }
   val status = RegInit(sm.idole)
-  val tier_status = RegInit(VecInit(Seq.fill(2)(sm.idole)))
+
+  tier_data.zipWithIndex.map{
+    case(d, i) => {
+      when(status === sm.next_tier_is_0 && io.cacheable_out.valid && io.cacheable_out.ready){
+        d := d + (16 << log2Ceil(FPGA_Num)).U
+      }.elsewhen(io.signal && status === sm.signal_wait_0){
+        d := (i << log2Ceil(FPGA_Num)).U(32.W)
+      }
+    }
+  }
 
   when(io.start && status === sm.idole){
-    status := sm.next_tier_is_1
-  }.elsewhen(status === sm.next_tier_is_1 && tier_counter(0) === 0.U){
+    tier_counter := io.graph_scale
+  }.elsewhen(status === sm.next_tier_is_0 && io.cacheable_out.valid && io.cacheable_out.ready){
+    tier_counter := Mux(tier_counter > 16.U, tier_counter - 16.U, 0.U)
+  }.elsewhen(io.signal && status === sm.signal_wait_0){
+    tier_counter := io.graph_scale
+  }
+  val keep = VecInit(Seq.tabulate(16)(x => Mux(x.U < tier_counter, true.B, false.B)))
+
+  when(io.start && status === sm.idole){
+    status := sm.next_tier_is_0
+  }.elsewhen(status === sm.next_tier_is_0 && tier_counter <= 16.U && tier_counter > 0.U &&
+    io.cacheable_out.valid && io.cacheable_out.ready){
     status := sm.sync_send_0
   }.elsewhen(status === sm.sync_send_0 && io.cacheable_out.valid && io.cacheable_out.ready){
     status := sm.signal_wait_0
   }.elsewhen(io.signal && status === sm.signal_wait_0){
-    when(tier_status(1) =/= sm.idole) {
-      status := sm.wait_tier1_wb
-    }.otherwise{
       status := sm.next_tier_is_0
-    }
-  }.elsewhen(status === sm.next_tier_is_0 && tier_counter(1) === 0.U){
-    status := sm.sync_send_1
-  }.elsewhen(status === sm.sync_send_1 && io.cacheable_out.valid && io.cacheable_out.ready){
-    status := sm.signal_wait_1
-  }.elsewhen(io.signal && status === sm.signal_wait_1){
-    when(tier_status(0) =/= sm.idole){
-      status := sm.wait_tier0_wb
-    }.otherwise{
-      status := sm.next_tier_is_1
-    }
-  }.elsewhen(status === sm.wait_tier0_wb && tier_status(0) === sm.idole){
-    status := sm.next_tier_is_1
-  }.elsewhen(status === sm.wait_tier1_wb && tier_status(1) === sm.idole){
-    status := sm.next_tier_is_0
   }.elsewhen(io.end){
     status := sm.idole
   }
 
-  val next_tier_mask = Cat(status === sm.next_tier_is_1 | status === sm.sync_send_0 | status === sm.signal_wait_0 | status === sm.wait_tier1_wb,
-      status === sm.next_tier_is_0 | status === sm.sync_send_1 | status === sm.signal_wait_1 | status === sm.wait_tier0_wb)
   val axi = Wire(Flipped(new axidata(AXI_ADDR_WIDTH, AXI_DATA_WIDTH, AXI_ID_WIDTH, AXI_SIZE_WIDTH)))
-  val tier_base_addr = RegInit(VecInit(Seq.fill(2)(0.U(AXI_ADDR_WIDTH.W))))
-  val step_fin = io.signal && (status === sm.signal_wait_0 | status === sm.signal_wait_1)
-  tier_base_addr.zipWithIndex.map{
-    case(a, i) => {
-      when((io.start && status === sm.idole) | step_fin){
-        a := io.tiers_base_addr(i)
-      }.elsewhen(next_tier_mask(i) && axi.aw.ready.asBool() && axi.aw.valid.asBool()){
-        a := a + 1024.U
-      }.elsewhen(!next_tier_mask(i) && axi.ar.ready.asBool() && axi.ar.valid.asBool()){
-        a := a + 1024.U
-      }
-    }
-  }
-  tier_counter.zipWithIndex.map{
-    case(c, i) => {
-      when(next_tier_mask(i) && io.cacheable_in.map{ case i => i.ready && i.valid }.reduce(_|_)){
-        c := c + io.cacheable_in.map{ case i => (i.ready && i.valid).asTypeOf(UInt(6.W)) }.reduce(_+_)
-      }.elsewhen(!next_tier_mask(i) && io.cacheable_out.ready && io.cacheable_out.valid){
-        c := Mux(tier_fifo(i).io.out.data_count > 16.U, c - 16.U, c - tier_fifo(i).io.out.data_count)
-      }
-    }
-  }
 
-  //shufle next level vertices to different channels
-  val in_pipeline = Seq.fill(Scatter_num)(
-    Module(new axis_reg_slice(4, "multi_channel_fifo_reg_slice"))
-  )
-  val fifos_ready = Mux(next_tier_mask(0), tier_fifo(0).io.in.ready, tier_fifo(1).io.in.ready)
-  in_pipeline.zipWithIndex.map{
-    case(p, i) => {
-      p.io.aclk := clock.asBool()
-      p.io.aresetn := ~reset.asBool()
-      p.io.s_axis.connectfrom(io.cacheable_in(i).bits)
-      p.io.s_axis.tvalid := io.cacheable_in(i).valid
-      io.cacheable_in(i).ready := p.io.s_axis.tready
-      io.cacheable_in(i).ready := p.io.s_axis.tready
-      p.io.m_axis.tready := fifos_ready
-    }
-  }
-  val steps = (Seq.tabulate(Scatter_num)(
-    i => {
-      Seq.tabulate(i + 1)(x => (in_pipeline(x).io.m_axis.tvalid.asBool() && fifos_ready).asTypeOf(UInt(5.W))).reduce(_+_)
-    }
-  ))
-  val counter = RegInit(0.U((log2Ceil(512) + 1).W))
-  when(steps(Scatter_num - 1) =/= 0.U){
-    counter := indexAdd(counter, steps(Scatter_num - 1))
-  }.elsewhen(io.signal && (status === sm.signal_wait_0 || status === sm.signal_wait_1)){
-    counter := 0.U
-  }
-  val fifo_in_data = Seq.tabulate(Scatter_num){
-    i => MuxCase(0.U, Seq.tabulate(Scatter_num)(
-        x => ((indexSub(counter, i.U) + 1.U) === steps(x)) -> in_pipeline(x).io.m_axis.tdata)
-      )
-  }
-  val fifo_in_valid = Seq.tabulate(Scatter_num){
-    i => MuxCase(0.U, Seq.tabulate(Scatter_num)(
-      x => ((indexSub(counter, i.U) + 1.U) === steps(x)) -> in_pipeline(x).io.m_axis.tvalid.asBool())
-    )
-  }
-  val ready_counter = RegInit(0.U(32.W))
-  dontTouch(ready_counter)
-  when(fifos_ready === false.B && in_pipeline.map{x => x.io.m_axis.tvalid.asBool()}.reduce(_|_)){
-    ready_counter := ready_counter + 1.U
-  }
-  tier_fifo.zipWithIndex.map{
-    case(f, i) => {
-      f.io.out.rd_en := Mux(next_tier_mask(i), axi.w.valid.asBool() && axi.w.ready.asBool(), io.cacheable_out.ready
-       && io.cacheable_out.valid)
-      f.io.out.wr_en := Mux(next_tier_mask(i), 0.U, axi.r.valid)
-      f.io.out.din := Mux(next_tier_mask(i), 0.U, axi.r.bits.rdata)
-      f.io.in.valid := fifo_in_valid.reduce(_|_)
-      f.io.in.bits.zipWithIndex.map{
-        case(in, x) => {
-          in.tkeep := fifo_in_valid(x)
-          in.tdata := fifo_in_data(x)
-          in.tlast := true.B
-        }
-      }
-      f.io.is_current_tier := ~next_tier_mask(i)
-    }
-  }
-  tier_status.zipWithIndex.map{
-    case (s, i) => {
-      when(next_tier_mask(i) && tier_fifo(i).io.out.almost_full && s === sm.idole
-      && status =/= sm.wait_tier0_wb && status =/= sm.wait_tier1_wb){
-        s := sm.writeback
-      }.elsewhen(!next_tier_mask(i) && tier_fifo(i).is_empty() && tier_counter(i) =/= 0.U && s === sm.idole){
-        s := sm.readback
-      }.elsewhen(s === sm.writeback && axi.aw.ready){
-        s := sm.writebackdata
-      }.elsewhen(s === sm.readback && axi.ar.ready){
-        s := sm.readbackdata
-      }.elsewhen(s === sm.readbackdata && axi.r.bits.rlast.asBool() && axi.r.ready && axi.r.valid){
-        s := sm.idole
-      }.elsewhen(s === sm.writebackdata && axi.w.bits.wlast.asBool() && axi.w.ready.asBool()){
-        s := sm.idole
-      }
-    }
-  }
-
-  io.unvisited_size := Mux(next_tier_mask(0), tier_counter(0), tier_counter(1))
-  io.cacheable_out.valid := MuxCase(false.B,
-    Array(next_tier_mask(0) -> (tier_fifo(1).is_valid() | status === sm.sync_send_1),
-          next_tier_mask(1) -> (tier_fifo(0).is_valid() | status === sm.sync_send_0)))
-  io.cacheable_out.bits.tdata := MuxCase(0.U(512.W),
-    Array((status === sm.sync_send_0) -> "x80000000".asUInt(512.W),
-          (status === sm.sync_send_1) -> "x80000000".asUInt(512.W),
-          next_tier_mask(0) -> tier_fifo(1).io.out.dout,
-          next_tier_mask(1) -> tier_fifo(0).io.out.dout))
-  io.cacheable_out.bits.tkeep := Mux(status === sm.sync_send_0 | status === sm.sync_send_1, 1.U(16.W),
-    VecInit(Seq.tabulate(16)(
-      i => Mux(next_tier_mask(0), tier_fifo(1).io.out.data_count > i.U, tier_fifo(0).io.out.data_count > i.U)
-    )).asUInt())
+  io.unvisited_size := 0.U
+  io.cacheable_out.valid := status === sm.sync_send_0 || status === sm.next_tier_is_0
+  io.cacheable_out.bits.tdata := Mux(status === sm.sync_send_0, "x80000000".asUInt(512.W),
+    tier_data.asUInt())
+  io.cacheable_out.bits.tkeep := Mux(status === sm.sync_send_0, 1.U(16.W), keep.asUInt())
   io.cacheable_out.bits.tlast := true.B
 
-  val wcount = RegInit(0.U(8.W))
-  when(axi.aw.valid.asBool() && axi.aw.ready.asBool()){
-    wcount := 16.U
-  }.elsewhen(axi.w.valid.asBool() && axi.w.ready.asBool()){
-    wcount := wcount - 1.U
-  }
-  axi.aw.bits.awaddr := Mux(next_tier_mask(0), tier_base_addr(0), tier_base_addr(1))
-  axi.aw.bits.awid := 0.U
-  axi.aw.bits.awlen := 15.U
-  axi.aw.bits.awlock := 0.U
-  axi.aw.bits.awburst := 1.U
-  axi.aw.bits.awsize := 6.U
-  axi.aw.valid := Mux(next_tier_mask(0), tier_status(0) === sm.writeback, tier_status(1) === sm.writeback)
-  axi.ar.bits.araddr := Mux(next_tier_mask(0), tier_base_addr(1), tier_base_addr(0))
-  axi.ar.bits.arid := 0.U
-  axi.ar.bits.arlen := 15.U
-  axi.ar.bits.arburst := 1.U
-  axi.ar.bits.arsize := 6.U
-  axi.ar.bits.arlock := 0.U
-  axi.ar.valid := Mux(next_tier_mask(0), tier_status(1) === sm.readback, tier_status(0) === sm.readback)
-  axi.w.bits.wdata := Mux(next_tier_mask(0), tier_fifo(0).io.out.dout, tier_fifo(1).io.out.dout)
-  axi.w.valid := Mux(next_tier_mask(0), tier_status(0) === sm.writebackdata, tier_status(1) === sm.writebackdata)
-  axi.w.bits.wlast := wcount === 1.U
-  axi.w.bits.wstrb := VecInit(Seq.fill(64)(true.B)).asUInt()
+  axi.aw.bits.tie_off(0.U)
+  axi.aw.valid := false.B
+  axi.ar.bits.tie_off(0.U)
+  axi.ar.valid := 0.U
+  axi.w.valid := false.B
+  axi.w.bits.tie_off()
   axi.b.ready := true.B
   axi.r.ready := true.B
 
   io.ddr_out(0) <> axi
   io.ddr_out(1) <> io.non_cacheable_in
-
-  io.signal_ack := status === sm.signal_wait_1 | status === sm.signal_wait_0
+  io.cacheable_in.map{
+    case x => x.ready := true.B
+  }
+  io.signal_ack := status === sm.signal_wait_0
 }
 
 /*
@@ -1391,7 +1165,7 @@ class controller (AXI_ADDR_WIDTH : Int = 64, Scatter_num : Int, RegName : Map[St
   }.elsewhen(status === sm.exe && FIN.reduce(_&_)){
     status := sm.fin
   }.elsewhen(status === sm.fin && io.signal_ack === true.B){
-    when(io.unvisited_size === 0.U){
+    when(GetRegByName("LoopNum") === level){
       status := sm.write_clock
     }.otherwise{
       status := sm.exe
@@ -1439,7 +1213,7 @@ class controller (AXI_ADDR_WIDTH : Int = 64, Scatter_num : Int, RegName : Map[St
     }
   }
 
-  io.signal := status === sm.start || (status === sm.fin && io.unvisited_size =/= 0.U)
+  io.signal := status === sm.start || (status === sm.fin && GetRegByName("LoopNum") =/= level)
   io.data := controls.io.data
   io.level := level
   io.start := status === sm.start

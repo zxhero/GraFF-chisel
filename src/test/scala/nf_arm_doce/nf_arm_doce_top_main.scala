@@ -33,10 +33,11 @@ class BFS_ps(AXI_ADDR_WIDTH : Int = 64, AXI_DATA_WIDTH: Int = 64, AXI_ID_WIDTH: 
       "Rlevel_lo_2" -> 21, "Rlevel_hi_2" -> 22,
       "Rlevel_lo_3" -> 23, "Rlevel_hi_3" -> 24,
       "packet_size" -> 25, "pending_time" -> 26,
-      "net_constrain" -> 27)))
+      "net_constrain" -> 27, "LoopNum" -> 28,
+      "graph_scale" -> 29)))
 
   val MemController = Module(new multi_port_mc(AXI_ADDR_WIDTH, AXI_DATA_WIDTH, AXI_ID_WIDTH + 1,
-    AXI_SIZE_WIDTH, 16))
+    AXI_SIZE_WIDTH, 16, 4))
   val Applys = Seq.tabulate(16)(
     i => Module(new Scatter(4, i, 64, 4, 16))
   )
@@ -86,6 +87,7 @@ class BFS_ps(AXI_ADDR_WIDTH : Int = 64, AXI_DATA_WIDTH: Int = 64, AXI_ID_WIDTH: 
       pe.io.xbar_in <> Broadcaster.io.pe_out(i)
       pe.io.ddr_out <> MemController.io.cacheable_in(i)
       controls.io.fin(i) := pe.io.end
+      pe.io.graph_scale := controls.GetRegByName("graph_scale")
     }
   }
   Broadcaster.io.remote_in <> ReScatter.io.xbar_out
@@ -138,8 +140,7 @@ class BFS_ps(AXI_ADDR_WIDTH : Int = 64, AXI_DATA_WIDTH: Int = 64, AXI_ID_WIDTH: 
       b.io.recv_sync := VecInit(Scatters.map{i => i.io.issue_sync}.+:(ReScatter.io.issue_sync)).asUInt()
     }
   }
-  MemController.io.tiers_base_addr(0) := Cat(controls.io.data(9), controls.io.data(8))
-  MemController.io.tiers_base_addr(1) := Cat(controls.io.data(11), controls.io.data(10))
+  MemController.io.graph_scale := controls.GetRegByName("graph_scale")
   MemController.io.signal := controls.io.signal && controls.io.signal_ack
   MemController.io.start := controls.io.start
   MemController.io.end := controls.io.data(0)(1)
